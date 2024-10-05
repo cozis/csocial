@@ -394,6 +394,11 @@ int    match_path_format(string path, char *fmt, ...);
 bool   get_query_string_param(string str, string key, string dst, string *out);
 bool   get_cookie(Request *request, string name, string *out);
 
+SessionID create_session(string name);
+void      remove_session(SessionID id);
+string    name_from_session(SessionID id);
+SessionID session_from_request(Request request);
+
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// GLOBALS                                                                                 ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -685,91 +690,6 @@ void free_globals(void)
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// RESPONSE CALLBACK                                                                       ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
-
-SessionID create_session(string name)
-{
-	int i = 0;
-	while (i < MAX_SESSIONS && sessions[i].id != NO_SESSION)
-		i++;
-	if (i == MAX_SESSIONS)
-		return NO_SESSION;
-
-	if (next_session_id == NO_SESSION)
-		next_session_id++;
-	SessionID id = next_session_id++;
-
-	if (name.size > sizeof(sessions[i].namebuf))
-		log_fatal(LIT("User name buffer is too small"));
-	memcpy(sessions[i].namebuf, name.data, name.size);
-
-	sessions[i].id = id;
-	sessions[i].name = (string) { sessions[i].namebuf, name.size };
-
-	return sessions[i].id;
-}
-
-void remove_session(SessionID id)
-{
-	assert(id != NO_SESSION);
-
-	int i = 0;
-	while (i < MAX_SESSIONS && sessions[i].id != id)
-		i++;
-	if (i == MAX_SESSIONS)
-		log_fatal(LIT("Trying to remove non existing session"));
-	sessions[i].id = NO_SESSION;
-	sessions[i].name = NULLSTR;
-	memset(sessions[i].namebuf, 0, sizeof(sessions[i].namebuf));
-}
-
-string name_from_session(SessionID id)
-{
-	assert(id != NO_SESSION);
-	for (int i = 0; i < MAX_SESSIONS; i++)
-		if (sessions[i].id == id)
-			return sessions[i].name;
-	return NULLSTR;
-}
-
-SessionID session_from_request(Request request)
-{
-	string sessid_str;
-	if (!get_cookie(&request, LIT("sessid"), &sessid_str))
-		return NO_SESSION;
-
-	SessionID id;
-	{
-		char  *src = sessid_str.data;
-		size_t len = sessid_str.size;
-		size_t i = 0;
-
-		while (i < len && is_space(src[i]))
-			i++;
-
-		if (i == len || !is_digit(src[i]))
-			return NO_SESSION;
-		uint32_t buf = 0;
-		do {
-			int d = src[i] - '0';
-			if (buf > (UINT32_MAX - d) / 10)
-				return NO_SESSION;
-			buf = buf * 10 + d;
-			i++;
-		} while (i < len && is_digit(src[i]));
-
-		while (i < len && is_space(src[i]))
-			i++;
-
-		if (i < len)
-			return NO_SESSION;
-
-		assert(sizeof(buf) == sizeof(SessionID));
-		assert(buf != 0 && buf != NO_SESSION);
-		id = buf;
-	}
-
-	return id;
-}
 
 void respond(Request request, ResponseBuilder *b)
 {
@@ -1072,6 +992,95 @@ void respond(Request request, ResponseBuilder *b)
 
 	status_line(b, 404);
 	append_content_s(b, LIT("Nothing here :|"));
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// SESSIONS                                                                                ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+SessionID create_session(string name)
+{
+	int i = 0;
+	while (i < MAX_SESSIONS && sessions[i].id != NO_SESSION)
+		i++;
+	if (i == MAX_SESSIONS)
+		return NO_SESSION;
+
+	if (next_session_id == NO_SESSION)
+		next_session_id++;
+	SessionID id = next_session_id++;
+
+	if (name.size > sizeof(sessions[i].namebuf))
+		log_fatal(LIT("User name buffer is too small"));
+	memcpy(sessions[i].namebuf, name.data, name.size);
+
+	sessions[i].id = id;
+	sessions[i].name = (string) { sessions[i].namebuf, name.size };
+
+	return sessions[i].id;
+}
+
+void remove_session(SessionID id)
+{
+	assert(id != NO_SESSION);
+
+	int i = 0;
+	while (i < MAX_SESSIONS && sessions[i].id != id)
+		i++;
+	if (i == MAX_SESSIONS)
+		log_fatal(LIT("Trying to remove non existing session"));
+	sessions[i].id = NO_SESSION;
+	sessions[i].name = NULLSTR;
+	memset(sessions[i].namebuf, 0, sizeof(sessions[i].namebuf));
+}
+
+string name_from_session(SessionID id)
+{
+	assert(id != NO_SESSION);
+	for (int i = 0; i < MAX_SESSIONS; i++)
+		if (sessions[i].id == id)
+			return sessions[i].name;
+	return NULLSTR;
+}
+
+SessionID session_from_request(Request request)
+{
+	string sessid_str;
+	if (!get_cookie(&request, LIT("sessid"), &sessid_str))
+		return NO_SESSION;
+
+	SessionID id;
+	{
+		char  *src = sessid_str.data;
+		size_t len = sessid_str.size;
+		size_t i = 0;
+
+		while (i < len && is_space(src[i]))
+			i++;
+
+		if (i == len || !is_digit(src[i]))
+			return NO_SESSION;
+		uint32_t buf = 0;
+		do {
+			int d = src[i] - '0';
+			if (buf > (UINT32_MAX - d) / 10)
+				return NO_SESSION;
+			buf = buf * 10 + d;
+			i++;
+		} while (i < len && is_digit(src[i]));
+
+		while (i < len && is_space(src[i]))
+			i++;
+
+		if (i < len)
+			return NO_SESSION;
+
+		assert(sizeof(buf) == sizeof(SessionID));
+		assert(buf != 0 && buf != NO_SESSION);
+		id = buf;
+	}
+
+	return id;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////

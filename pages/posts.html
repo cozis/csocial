@@ -1,0 +1,43 @@
+<html>
+	<head>
+		<title>Posts</title>
+		<link rel="stylesheet" media="screen" href="/static/global.css" />
+	</head>
+	<body>
+		<main>
+			<nav>
+				<table>
+					<tr>
+						<td><a href="/posts">Posts</a></td>
+						<td><a href="/users">Users</a></td>
+					</tr>
+				</table>
+				<table>
+					<tr>
+						{% if login %}
+						<td><a href="/users/{{login_username}}">{{login_username}}</a></td>
+						<td><a href="/action/logout">logout</a></td>
+						{% else %}
+						<td><a href="/login">login</a></td>
+						<td><a href="/signup">signup</a></td>
+						{% end %}
+					</tr>
+				</table>
+			</nav>
+
+			{% if login %}
+			<form action="/action/post" method="POST">
+				<input type="text" name="title" placeholder="title" />
+				<textarea name="content" placeholder="content"></textarea>
+				<input type="submit" value="publish" />
+			</form>
+			{% end %}
+
+			{% for post in posts %}
+			<div class="post-preview">
+				<a href="/posts/{{post.id}}">{{post.title}}</a> by <a href="/users/{{post.author}}">{{post.author}}</a>
+			</div>
+			{% end %}
+		</main>
+	</body>
+</html>

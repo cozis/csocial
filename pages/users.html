@@ -1,0 +1,35 @@
+<html>
+	<head>
+		<title>Users</title>
+		<link rel="stylesheet" media="screen" href="/static/global.css" />
+	</head>
+	<body>
+		<main>
+			<nav>
+				<table>
+					<tr>
+						<td><a href="/posts">Posts</a></td>
+						<td><a href="/users">Users</a></td>
+					</tr>
+				</table>
+				<table>
+					<tr>
+						{% if login %}
+						<td><a href="/users/{{login_username}}">{{login_username}}</a></td>
+						<td><a href="/action/logout">logout</a></td>
+						{% else %}
+						<td><a href="/login">login</a></td>
+						<td><a href="/signup">signup</a></td>
+						{% end %}
+					</tr>
+				</table>
+			</nav>
+
+			{% for user in users %}
+			<div class="user-preview">
+				<a href="/users/{{user.name}}">{{user.name}}</a>
+			</div>
+			{% end %}
+		</main>
+	</body>
+</html>

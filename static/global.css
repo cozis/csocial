@@ -1,0 +1,66 @@
+main {
+	width: 600px;
+	margin: auto;
+}
+
+nav {
+	overflow: auto;
+	background: #fab8b8;
+	border: 1px solid #c16464;
+	border-radius: 3px;
+	margin-bottom: 10px;
+}
+nav table {
+	float: left;
+	border-collapse: collapse;
+}
+nav table:last-child {
+	float: right;
+}
+nav table td {
+	padding: 10px;
+}
+
+form {
+	width: calc(100% - 20px);
+	padding: 10px;
+	overflow: auto;
+	background: #c9ffcd;
+	border-radius: 3px;
+	border: 1px solid #76c97d;
+}
+form input,
+form textarea {
+	width: 100%;
+	margin-bottom: 10px;
+	padding: 3px;
+	border-radius: 3px;
+	border: 1px solid #76c97d;
+}
+form input:last-child,
+form textarea:last-child {
+	margin-bottom: 0;
+}
+form textarea {
+	height: 150px;
+}
+form input[type=submit] {
+	width: 200px;
+	float: right;
+}
+
+.user-preview {
+	margin-top: 10px;
+	padding: 10px;
+	background: #ccd6fb;
+	border: 1px solid #6478c1;
+	border-radius: 3px;
+}
+
+.post-preview {
+	margin-top: 10px;
+	padding: 10px;
+	background: #ccd6fb;
+	border: 1px solid #6478c1;
+	border-radius: 3px;
+}

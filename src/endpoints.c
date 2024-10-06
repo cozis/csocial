@@ -40,17 +40,17 @@ char schema[] =
 	"    bio  TEXT\n"
 	");\n"
 	"CREATE TABLE IF NOT EXISTS Posts(\n"
-	"    id      INTEGER PRIMARY KEY,\n"
+	"    id      INTEGER PRIMARY KEY AUTOINCREMENT,\n"
 	"    title   TEXT NOT NULL,\n"
 	"    content TEXT NOT NULL,\n"
-	"    author  TEXT,\n"
+	"    author  TEXT NOT NULL,\n"
 	"    FOREIGN KEY (author) REFERENCES Users(name)\n"
 	");\n"
 	"CREATE TABLE IF NOT EXISTS Comments(\n"
-	"    id      INTEGER PRIMARY KEY,\n"
+	"    id      INTEGER PRIMARY KEY AUTOINCREMENT,\n"
 	"    content TEXT NOT NULL,\n"
-	"    author  TEXT,\n"
-	"    parent  INTEGER,\n"
+	"    author  TEXT NOT NULL,\n"
+	"    parent  INTEGER NOT NULL,\n"
 	"    FOREIGN KEY (author) REFERENCES Users(name),\n"
 	"    FOREIGN KEY (parent) REFERENCES Posts(id)\n"
 	");\n"
@@ -302,6 +302,7 @@ void respond(Request request, ResponseBuilder *b)
 		TemplateParam params[] = {
 			{.name=LIT("login"),          .type=TPT_INT,    .i=login_username.size>0},
 			{.name=LIT("login_username"), .type=TPT_STRING, .s=login_username},
+			{.name=LIT("id"),             .type=TPT_INT,    .i=post_id},
 			{.name=LIT("title"),          .type=TPT_STRING, .s=title},
 			{.name=LIT("author"),         .type=TPT_STRING, .s=author},
 			{.name=LIT("content"),        .type=TPT_STRING, .s=content},
@@ -316,7 +317,7 @@ void respond(Request request, ResponseBuilder *b)
 
 	int comment_post_id;
 	if (!match_path_format(request.url.path, "/posts/:n/comments", &comment_post_id)) {
-		if (login_username.size > 0) {
+		if (login_username.size == 0) {
 			status_line(b, 303);
 			add_header(b, LIT("Location: /"));
 			return;

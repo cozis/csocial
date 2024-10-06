@@ -29,10 +29,12 @@
 				<h1>{{title}} (by {{author}})</h1>
 				<p>{{content}}</p>
 
+				{% if login %}
 				<form action="/posts/{{id}}/comments" method="POST">
 					<textarea name="content" placeholder="comment"></textarea>
 					<input type="submit" value="comment" />
 				</form>
+				{% end %}
 
 				<table>
 				{% for comment in comments %}

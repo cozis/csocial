@@ -1,0 +1,6 @@
+#ifndef CFORUM_BACKTRACE_INCLUDED
+#define CFORUM_BACKTRACE_INCLUDED
+
+void dump_backtrace(int signo);
+
+#endif // CFORUM_BACKTRACE_INCLUDED

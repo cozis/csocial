@@ -1,5 +1,7 @@
 social
 social.exe
 *.db
+*.pem
 backtrace.txt
 logs/*
+3p/*

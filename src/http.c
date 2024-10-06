@@ -31,28 +31,27 @@
 /// HEADERS                                                                                 ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-#define _GNU_SOURCE
+// TODO: Clean up these headers
+#include <time.h>
+#include <poll.h>
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
-#include <dirent.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <signal.h> // sig_atomic_t
+#include <dirent.h>
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <arpa/inet.h>
-#include <poll.h>
-#include <time.h>
-#include "sqlite3.h"
+#include "log.h"
+#include "http.h"
 #include "tinytemplate.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -63,12 +62,6 @@
 #define HTTPS 0
 #endif
 
-#define BACKTRACE        1
-#define BACKTRACE_FILE   "backtrace.txt"
-#define BACKTRACE_LIMIT 30
-
-#define EOPALLOC      0
-#define PROFILE       0
 #define INPUT_BUFFER_LIMIT_MB   1
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -79,47 +72,9 @@
 #include <bearssl.h>
 #endif
 
-#if PROFILE
-#include <x86intrin.h>
-#endif
-
-#if EOPALLOC
-#include <sys/mman.h>
-#endif
-
-#if BACKTRACE
-#include <dlfcn.h>
-#include <execinfo.h>
-#endif
-
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// TYPES & DEFINITIONS                                                                     ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef struct {
-	char  *data;
-	size_t size;
-} string;
-
-#define LIT(S) ((string) {.data=(S), .size=sizeof(S)-1})
-#define STR(S) ((string) {.data=(S), .size=strlen(S)})
-#define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
-#define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
-#define SIZEOF(X) ((ssize_t) sizeof(X))
-#define COUNTOF(X) (SIZEOF(X) / SIZEOF((X)[0]))
-#define NULLSTR ((string) {.data=NULL, .size=0})
-
-#ifndef NDEBUG
-#define DEBUG(fmt, ...) write_format_to_stderr(fmt, ## __VA_ARGS__)
-#else
-#define DEBUG(...) {}
-#endif
-
-#if PROFILE
-#define TIME(label) for (uint64_t start__ = __rdtsc(), done__ = 0; !done__; timing_result(__COUNTER__, __rdtsc() - start__, LIT(label)), (done__=1))
-#else
-#define TIME(...)
-#endif
 
 #if HTTPS
 typedef struct {
@@ -143,82 +98,6 @@ typedef struct {
 } BearSSLErrorInfo;
 #endif
 
-typedef enum {
-	URL_HOSTMODE_NAME,
-	URL_HOSTMODE_IPV4,
-	URL_HOSTMODE_IPV6,
-} url_hostmode;
-
-typedef struct {
-	url_hostmode mode;
-	union {
-		uint32_t ipv4;
-		uint16_t ipv6[8];
-		string   name;
-	};
-	bool  no_port;
-	uint16_t port;
-} url_host;
-
-typedef struct {
-	string username;
-	string password;
-} url_userinfo;
-
-typedef struct {
-	url_host host;
-	url_userinfo userinfo;
-	string path;
-	string query;
-	string schema;
-	string fragment;
-} url_t;
-
-enum {
-	P_OK,
-	P_INCOMPLETE,
-	P_BADMETHOD,
-	P_BADVERSION,
-	P_BADHEADER,
-	P_BADURL,
-};
-
-enum {
-	T_CHUNKED  = 1 << 0,
-	T_COMPRESS = 1 << 1,
-	T_DEFLATE  = 1 << 2,
-	T_GZIP     = 1 << 3,
-};
-
-typedef enum {
-	M_GET,
-	M_POST,
-	M_HEAD,
-	M_PUT,
-	M_DELETE,
-	M_CONNECT,
-	M_OPTIONS,
-	M_TRACE,
-	M_PATCH,
-} Method;
-
-#define MAX_HEADERS 32
-
-typedef struct {
-	string name;
-	string value;
-} Header;
-
-typedef struct {
-	Method method;
-	url_t  url;
-	int    major;
-	int    minor;
-	int    nheaders;
-	Header headers[MAX_HEADERS];
-	string content;
-} Request;
-
 typedef struct {
 	char  *data;
 	size_t head;
@@ -226,7 +105,7 @@ typedef struct {
 	size_t capacity;
 } ByteQueue;
 
-typedef struct {
+struct Connection {
 	int fd;
 	ByteQueue input;
 	ByteQueue output;
@@ -241,854 +120,80 @@ typedef struct {
 	br_ssl_server_context https_context;
 	char https_buffer[BR_SSL_BUFSIZE_BIDI];
 #endif
-} Connection;
-
-typedef enum {
-	R_STATUS,
-	R_HEADER,
-	R_CONTENT,
-	R_COMPLETE,
-} ResponseBuilderState;
-
-typedef struct {
-	ResponseBuilderState state;
-	Connection *conn;
-	bool failed;
-	bool keep_alive;
-	size_t content_length_offset;
-	size_t content_offset;
-} ResponseBuilder;
-
-typedef uint32_t SessionID;
-#define NO_SESSION ((SessionID) -1)
-
-#define MAX_SESSIONS 512
-#define MAX_USER_NAME 32
-#define MAX_USER_PASS 256
-#define MAX_USER_BIO  1024
-#define MAX_POST_TITLE 1024
-#define MAX_POST_CONTENT (1<<14)
-
-typedef struct {
-	uint32_t id;
-	string name;
-	char namebuf[MAX_USER_NAME];
-} Session;
-
-typedef enum {
-	TPT_INT,
-	TPT_FLOAT,
-	TPT_STRING,
-	TPT_QUERY,
-	TPT_LAST,
-} TemplateParamType;
-
-typedef struct {
-	TemplateParamType type;
-	string name;
-	union {
-		int64_t i;
-		double  f;
-		string  s;
-		sqlite3_stmt *q;
-	};
-} TemplateParam;
+};
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// FORWARD DECLARATIONS                                                                    ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-bool url_parse2(string str, size_t *i, url_t *url);
-bool url_parse(string str, url_t *url);
-bool url_parse_ipv6(string str, uint16_t out[8]);
-bool url_parse_ipv4(string str, uint32_t *out);
+static bool url_parse2(string str, size_t *i, url_t *url);
+static bool url_parse(string str, url_t *url);
+static bool url_parse_ipv6(string str, uint16_t out[8]);
+static bool url_parse_ipv4(string str, uint32_t *out);
 
-void     config_init(void);
-void     config_free(void);
-bool     config_load(string file);
-uint32_t config_int(string name);
-bool     config_bool(string name);
-string   config_string(string name);
-
-void     log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffer_size);
-void     log_free(void);
-void     log_data(string str);
-void     log_fatal(string str);
-void     log_perror(string str);
-void     log_format(const char *fmt, ...);
-void     log_flush(void);
-bool     log_empty(void);
-
-void     byte_queue_init(ByteQueue *q);
-void     byte_queue_free(ByteQueue *q);
-size_t   byte_queue_size(ByteQueue *q);
-bool     byte_queue_ensure_min_free_space(ByteQueue *q, size_t num);
-string   byte_queue_start_write(ByteQueue *q);
-void     byte_queue_end_write(ByteQueue *q, size_t num);
-string   byte_queue_start_read(ByteQueue *q);
-void     byte_queue_end_read(ByteQueue *q, size_t num);
-bool     byte_queue_write(ByteQueue *q, string src);
-void     byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
-
-sqlite3_stmt *sqlite3_utils_prepare(sqlite3 *handle, const char *fmt, ...);
-int           sqlite3_utils_rows_exist(sqlite3 *handle, const char *fmt, ...);
-bool          sqlite3_utils_exec(sqlite3 *handle, const char *fmt, ...);
-int           sqlite3_utils_fetch(sqlite3_stmt *stmt, char *types, ...);
-
-#if PROFILE
-void     timing_init(void);
-void     timing_result(int scope_index, uint64_t delta_cycles, string label);
-void     timing_print_results(void);
-#endif
+static void     byte_queue_init(ByteQueue *q);
+static void     byte_queue_free(ByteQueue *q);
+static size_t   byte_queue_size(ByteQueue *q);
+static bool     byte_queue_ensure_min_free_space(ByteQueue *q, size_t num);
+static string   byte_queue_start_write(ByteQueue *q);
+static void     byte_queue_end_write(ByteQueue *q, size_t num);
+static string   byte_queue_start_read(ByteQueue *q);
+static void     byte_queue_end_read(ByteQueue *q, size_t num);
+static bool     byte_queue_write(ByteQueue *q, string src);
+static void     byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
 
 #if HTTPS
-bool     load_private_key_from_file(string file, PrivateKey *pkey);
-void     free_private_key(PrivateKey *pkey);
-bool     load_certs_from_file(string file, CertArray *array);
-void     free_certs(CertArray *array);
-BearSSLErrorInfo get_bearssl_error_info(int code);
+static bool load_private_key_from_file(string file, PrivateKey *pkey);
+static void free_private_key(PrivateKey *pkey);
+static bool load_certs_from_file(string file, CertArray *array);
+static void free_certs(CertArray *array);
+static BearSSLErrorInfo get_bearssl_error_info(int code);
 #endif
 
-char     to_lower(char c);
-bool     is_print(char c);
-bool     is_pcomp(char c);
-bool     is_digit(char c);
-bool     is_alpha(char c);
-bool     is_space(char c);
-
-string trim(string s);
-string substr(string str, size_t start, size_t end);
-bool   streq(string s1, string s2);
-bool   string_match_case_insensitive(string x, string y);
-bool   endswith(string suffix, string name);
-bool   startswith(string prefix, string str);
-void   print_bytes(string prefix, string str);
-
-void  *mymalloc(size_t num);
-void   myfree(void *ptr, size_t num);
-
-uint64_t get_real_time_ms(void);
-uint64_t get_monotonic_time_ms(void);
-uint64_t get_monotonic_time_ns(void);
-
-bool   load_file_contents(string file, string *out);
-bool   set_blocking(int fd, bool blocking);
-bool   write_string_to_stderr(string s);
-bool   write_format_to_stderr(const char *fmt, ...);
-bool   write_format_to_stderr_va(const char *fmt, va_list args);
-bool   read_from_socket(int fd, ByteQueue *queue);
-bool   write_to_socket(int fd, ByteQueue *queue);
-int    create_listening_socket(string addr, int port);
-
-void   status_line(ResponseBuilder *b, int status);
-void   add_header(ResponseBuilder *b, string header);
-void   add_header_f(ResponseBuilder *b, const char *fmt, ...);
-void   append_content_s(ResponseBuilder *b, string str);
-void   append_content_f(ResponseBuilder *b, const char *fmt, ...);
-string append_content_start(ResponseBuilder *b, size_t cap);
-void   append_content_end(ResponseBuilder *b, size_t num);
-bool   append_file(ResponseBuilder *b, string file);
-bool   append_template(ResponseBuilder *b, string file, TemplateParam *params);
-bool   serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot, string reqpath, string mime, bool enable_dir_listing);
-int    match_path_format(string path, char *fmt, ...);
-bool   get_query_string_param(string str, string key, string dst, string *out);
-bool   get_cookie(Request *request, string name, string *out);
-
-SessionID create_session(string name);
-void      remove_session(SessionID id);
-string    name_from_session(SessionID id);
-SessionID session_from_request(Request request);
+static bool set_blocking(int fd, bool blocking);
+static bool read_from_socket(int fd, ByteQueue *queue);
+static bool write_to_socket(int fd, ByteQueue *queue);
+static int  create_listening_socket(string addr, int port);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// GLOBALS                                                                                 ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-volatile sig_atomic_t stop = 0;
+static volatile sig_atomic_t stop = 0;
 
-Connection *conns;
-int num_conns = 0;
-int max_conns = 0;
+static Connection *conns;
+static int num_conns = 0;
+static int max_conns = 0;
 
-struct pollfd *pollarray;
+static struct pollfd *pollarray;
 
-uint64_t now;
-uint64_t real_now;
+static uint64_t now;
+static uint64_t real_now;
 
-int insecure_fd;
-int secure_fd;
+static int insecure_fd;
+static int secure_fd;
 
-sqlite3 *db;
-	
-char schema[] =
-	"CREATE TABLE IF NOT EXISTS Users(\n"
-	"    name TEXT PRIMARY KEY,\n"
-	"    pass TEXT NOT NULL,\n"
-	"    bio  TEXT\n"
-	");\n"
-	"CREATE TABLE IF NOT EXISTS Posts(\n"
-	"    id      INTEGER PRIMARY KEY,\n"
-	"    title   TEXT NOT NULL,\n"
-	"    content TEXT NOT NULL,\n"
-	"    author  TEXT,\n"
-	"    FOREIGN KEY (author) REFERENCES Users(name)\n"
-	");\n"
-	"PRAGMA foreign_keys = ON;\n";
-
-Session sessions[MAX_SESSIONS];
-SessionID next_session_id = 1;
-
-bool show_io;
-bool show_requests;
-bool access_log;
-int keep_alive_max_requests;
-int connection_timeout_sec;
-int closing_timeout_sec;
-int request_timeout_sec;
-int log_flush_timeout_sec;
+static bool show_io;
+static bool show_requests;
+static bool access_log;
+static int keep_alive_max_requests;
+static int connection_timeout_sec;
+static int closing_timeout_sec;
+static int request_timeout_sec;
+static int log_flush_timeout_sec;
+static void (*respond_callback)(Request, ResponseBuilder*);
 
 #if HTTPS
-PrivateKey pkey;
-CertArray certs;
+static PrivateKey pkey;
+static CertArray certs;
 #endif
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// IMPLEMENTATION                                                                          ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-#if BACKTRACE
-void crash_signal_handler(int signo)
-{
-	string signame;
-	switch (signo) {
-		case SIGSEGV: signame = LIT("Segmentation fault");       break;
-		case SIGABRT: signame = LIT("Aborted");                  break;
-		case SIGFPE:  signame = LIT("Floating-point exception"); break;
-		case SIGILL:  signame = LIT("Illegal instruction");      break;
-		default:      signame = LIT("Unknown signal");           break;
-	}
-
-	void *stack_buf[BACKTRACE_LIMIT];
-	int num_stack = backtrace(stack_buf, COUNTOF(stack_buf));
-
-	char buffer[4096];
-	int used = snprintf(buffer, sizeof(buffer), "\n%.*s\nStack trace:\n", (int) signame.size, signame.data);
-
-	for (int i = 0; i < num_stack; i++) {
-
-		int n;
-		Dl_info info;
-		if (dladdr(stack_buf[i], &info) && info.dli_sname) {
-			n = snprintf(buffer + used, sizeof(buffer) - used, "  #%d: %s (%p, %s)\n", i, info.dli_sname, info.dli_fbase, info.dli_fname);
-		} else {
-			n = snprintf(buffer + used, sizeof(buffer) - used, "  #%d: ??? (%p)\n", i, stack_buf[i]);
-		}
-		used = MIN(COUNTOF(buffer)-1, used + n);
-	}
-
-	int fd = open(BACKTRACE_FILE, O_WRONLY | O_APPEND | O_CREAT, 0644);
-	if (fd < 0) return;
-
-	int cpy = 0;
-	while (cpy < used) {
-		int n = write(fd, buffer + cpy, used - cpy);
-		if (n < 0) return;
-		cpy += n;
-	}
-
-	close(fd);
-
-	signal(signo, SIG_DFL);
-	raise(signo);
-}
-#endif
-
-void termination_signal_handler(int signo) 
-{
-	(void) signo;
-	stop = 1;
-}
-
-void init_globals(int argc, char **argv)
-{
-	atexit(log_free);
-
-	string config_file = argc > 1 ? STR(argv[1]) : LIT("config.txt");
-	if (!config_load(config_file))
-		exit(-1);
-
-	access_log              = config_bool(LIT("access_log"));
-	show_io                 = config_bool(LIT("show_io"));
-	show_requests           = config_bool(LIT("show_requests"));
-	keep_alive_max_requests = config_int(LIT("keep_alive_max_requests"));
-	connection_timeout_sec  = config_int(LIT("connection_timeout_sec"));
-	closing_timeout_sec     = config_int(LIT("closing_timeout_sec"));
-	request_timeout_sec     = config_int(LIT("request_timeout_sec"));
-	log_flush_timeout_sec   = config_int(LIT("log_flush_timeout_sec"));
-
-	// Setup signal handlers
-	{
-#if BACKTRACE
-		struct sigaction sa_crash;
-		sa_crash.sa_handler = crash_signal_handler;
-		sigemptyset(&sa_crash.sa_mask);
-		sa_crash.sa_flags = SA_RESTART | SA_NODEFER;
-		sigaction(SIGSEGV, &sa_crash, NULL);
-		sigaction(SIGABRT, &sa_crash, NULL);
-		sigaction(SIGFPE,  &sa_crash, NULL);
-		sigaction(SIGILL,  &sa_crash, NULL);
-#endif
-
-		struct sigaction sa_term;
-		sa_term.sa_handler = termination_signal_handler;
-		sigemptyset(&sa_term.sa_mask);
-		sa_term.sa_flags = SA_RESTART;
-		sigaction(SIGTERM, &sa_term, NULL);
-		sigaction(SIGQUIT, &sa_term, NULL);
-		sigaction(SIGINT,  &sa_term, NULL);
-
-		DEBUG("Signals configured\n");
-	}
-
-	// Setup logging
-	{
-		log_init(
-			config_string(LIT("log_dir_path")),
-			config_int(LIT("log_dir_limit_mb")),
-			config_int(LIT("log_file_limit_b")),
-			config_int(LIT("log_buff_size_b"))
-		);
-		log_data(LIT("starting\n"));
-		DEBUG("Logger configured\n");
-	}
-
-#if PROFILE
-	timing_init();
-#endif
-
-	// Setup connection arrays
-	{
-		struct rlimit file_desc_limit;
-		if (getrlimit(RLIMIT_NOFILE, &file_desc_limit))
-			log_fatal(LIT("Couldn't query RLIMIT_NOFILE\n"));
-
-		max_conns = config_int(LIT("max_connections"));
-		num_conns = 0;
-		if ((size_t) max_conns+2 > file_desc_limit.rlim_cur)
-			log_fatal(LIT("max_connections+2 is higher than the rlimit\n"));
-
-		conns = mymalloc(max_conns * sizeof(Connection));
-		if (conns == NULL)
-			log_fatal(LIT("Out of memory"));
-
-		for (int i = 0; i < max_conns; i++) {
-			conns[i].fd = -1;
-			byte_queue_init(&conns[i].input);
-			byte_queue_init(&conns[i].output);
-		}
-
-		pollarray = mymalloc((max_conns+2) * sizeof(struct pollfd));
-		if (pollarray == NULL)
-			log_fatal(LIT("Out of memory"));
-
-		DEBUG("Connection array created\n");
-	}
-
-	// Create plain text listener
-	{
-		string   http_addr = config_string(LIT("http_addr"));
-		uint32_t http_port = config_int(LIT("http_port"));
-		insecure_fd = create_listening_socket(http_addr, http_port);
-		if (insecure_fd < 0)
-			log_fatal(LIT("Couldn't bind\n"));
-		log_format("Listening on %.*s:%d\n", (int) http_addr.size, http_addr.data, http_port);
-		DEBUG("HTTP started\n");
-	}
-
-	// Create secure listener
-	{
-		secure_fd = -1;
-#if HTTPS
-		string   https_addr = config_string(LIT("https_addr"));
-		uint32_t https_port = config_int(LIT("https_port"));
-		string   https_cert_file = config_string(LIT("cert_file"));
-		string   https_key_file  = config_string(LIT("privkey_file"));
-
-		secure_fd = create_listening_socket(https_addr, https_port);
-		if (secure_fd < 0)
-			log_fatal(LIT("Couldn't bind\n"));
-		log_format("Listening on %.*s:%d\n", (int) https_addr.size, https_addr.data, https_port);
-
-		// Load certificate
-		if (!load_certs_from_file(https_cert_file, &certs))
-			log_fatal(LIT("Couldn't load certificates\n"));
-		DEBUG("Certificates loaded\n");
-
-		// Load private key
-		if (!load_private_key_from_file(https_key_file, &pkey))
-			log_fatal(LIT("Couldn't load private key\n"));
-		DEBUG("Private key loaded\n");
-
-		DEBUG("HTTPS started\n");
-#endif
-	}
-
-	int code = sqlite3_open("file.db", &db);
-	if (code != SQLITE_OK) {
-		log_fatal(LIT("Couldn't open the database\n"));
-		sqlite3_close(db);
-		return;
-	}
-
-	{
-		char *errmsg;
-		int code = sqlite3_exec(db, schema, NULL, NULL, &errmsg);
-		if (code != SQLITE_OK) {
-			log_format("Couldn't apply database schema (%s)\n", errmsg);
-			sqlite3_free(errmsg);
-			sqlite3_close(db);
-			exit(-1);
-			return;
-		}
-	}
-
-	for (int i = 0; i < MAX_SESSIONS; i++)
-		sessions[i].id = NO_SESSION;
-
-	config_free();
-}
-
-void free_globals(void)
-{
-	sqlite3_close(db);
-
-#if PROFILE
-	timing_print_results();
-#endif
-
-#if HTTPS
-	free_private_key(&pkey);
-	free_certs(&certs);
-	close(secure_fd);
-#endif
-
-	close(insecure_fd);
-
-	for (int i = 0; i < max_conns; i++) {
-		if (conns[i].fd != -1) {
-			close(conns[i].fd);
-			byte_queue_free(&conns[i].input);
-			byte_queue_free(&conns[i].output);
-		}
-	}
-	myfree(conns, max_conns * sizeof(Connection));
-	myfree(pollarray, (max_conns+2) * sizeof(struct pollfd));
-
-	log_data(LIT("closing\n"));
-	log_free();
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// RESPONSE CALLBACK                                                                       ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-void respond(Request request, ResponseBuilder *b)
-{
-	if (request.major != 1 || request.minor > 1) {
-		status_line(b, 505); // HTTP Version Not Supported
-		return;
-	}
-
-	SessionID sessid = session_from_request(request);
-	string login_username = (sessid == NO_SESSION ? NULLSTR : name_from_session(sessid));
-
-	if (streq(request.url.path, LIT("/")))
-		request.url.path = LIT("/posts");
-
-	if (streq(request.url.path, LIT("/action/login"))) {
-		if (login_username.size > 0) {
-			status_line(b, 303);
-			add_header(b, LIT("Location: /"));
-			return;
-		}
-		char namebuf[MAX_USER_NAME];
-		char passbuf[MAX_USER_PASS];
-		string name;		string pass;
-		if (!get_query_string_param(request.content, LIT("name"), LIT(namebuf), &name)) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Invalid name"));
-			return;
-		}
-		if (!get_query_string_param(request.content, LIT("pass"), LIT(passbuf), &pass)) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Invalid pass"));
-			return;
-		}
-		int res = sqlite3_utils_rows_exist(db, "SELECT name FROM Users WHERE name=:s AND pass=:s", name, pass);
-		if (res == -1) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		if (res == 1) {
-			// No such user
-			status_line(b, 400);
-			append_content_s(b, LIT("Invalid credentials"));
-			return;
-		}
-		SessionID sessid = create_session(name);
-		if (sessid == NO_SESSION) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		// User exist
-		status_line(b, 303);
-		add_header_f(b, "Set-Cookie: sessid=%d; Path=/", sessid);
-		add_header(b, LIT("Location: /"));
-		return;
-	}
-
-	if (streq(request.url.path, LIT("/action/signup"))) {
-		if (login_username.size > 0) {
-			status_line(b, 303);
-			add_header(b, LIT("Location: /"));
-			return;
-		}
-		char namebuf[MAX_USER_NAME];
-		char passbuf[MAX_USER_PASS];
-		char  biobuf[MAX_USER_BIO];
-		string name;
-		string pass;
-		string bio;
-		if (!get_query_string_param(request.content, LIT("name"), LIT(namebuf), &name)) {
-			status_line(b, 400);
-			append_content_s(b, LIT("Invalid name"));
-			return;
-		}
-		if (!get_query_string_param(request.content, LIT("pass"), LIT(passbuf), &pass)) {
-			status_line(b, 400);
-			append_content_s(b, LIT("Invalid pass"));
-			return;
-		}
-		if (!get_query_string_param(request.content, LIT("bio"), LIT(biobuf), &bio)) {
-			status_line(b, 400);
-			append_content_s(b, LIT("Invalid bio"));
-			return;
-		}
-		name = trim(name);
-		pass = trim(pass);
-		bio = trim(bio);
-		if (name.size == 0 || pass.size == 0 || pass.size == 0) {
-			status_line(b, 400);
-			append_content_s(b, LIT("One or more fields are empty"));
-			return;
-		}
-		if (!sqlite3_utils_exec(db, "INSERT INTO Users(name, pass, bio) VALUES (:s, :s, :s)", name, pass, bio)) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		SessionID sessid = create_session(name);
-		if (sessid == NO_SESSION) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		status_line(b, 303);
-		add_header_f(b, "Set-Cookie: sessid=%d; Path=/", sessid);
-		add_header(b, LIT("Location: /"));
-		return;
-	}
-
-	if (streq(request.url.path, LIT("/action/logout"))) {
-		if (login_username.size > 0)
-			remove_session(sessid);
-		status_line(b, 303);
-		add_header(b, LIT("Location: /login"));
-		return;
-	}
-
-	if (streq(request.url.path, LIT("/action/post"))) {
-		if (login_username.size == 0) {
-			status_line(b, 400);
-			append_content_s(b, LIT("Not logged in"));
-			return;
-		}
-		char titlebuf[MAX_POST_TITLE];
-		char contentbuf[MAX_POST_CONTENT];
-		string title;
-		string content;
-		if (!get_query_string_param(request.content, LIT("title"), LIT(titlebuf), &title)) {
-			status_line(b, 400);
-			append_content_s(b, LIT("Invalid title"));
-			return;
-		}
-		if (!get_query_string_param(request.content, LIT("content"), LIT(contentbuf), &content)) {
-			status_line(b, 400);
-			append_content_s(b, LIT("Invalid content"));
-			return;
-		}
-		title = trim(title);
-		content = trim(content);
-		if (title.size == 0 || content.size == 0) {
-			status_line(b, 400);
-			append_content_s(b, LIT("One or more fields are empty"));
-			return;
-		}
-		if (!sqlite3_utils_exec(db, "INSERT INTO Posts(title, content, author) VALUES (:s, :s, :s)", title, content, login_username)) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		int64_t post_id = sqlite3_last_insert_rowid(db);
-		status_line(b, 303);
-		add_header_f(b, "Location: /posts/%d", post_id);
-		return;
-	}
-
-	if (!match_path_format(request.url.path, "/posts")) {
-		sqlite3_stmt *stmt = sqlite3_utils_prepare(db, "SELECT id, title, author FROM Posts");
-		if (stmt == NULL) {
-			status_line(b, 500);
-			return;
-		}
-		status_line(b, 200);
-		add_header(b, LIT("Content-Type: text/html"));
-		TemplateParam params[] = {
-			{.name=LIT("login"), .type=TPT_INT, .i=login_username.size>0},
-			{.name=LIT("login_username"), .type=TPT_STRING, .s=login_username},
-			{.name=LIT("posts"), .type=TPT_QUERY, .q=stmt},
-			{.name=NULLSTR, .type=TPT_LAST }
-		};
-		append_template(b, LIT("pages/posts.html"), params);
-		sqlite3_finalize(stmt);
-		return;
-	}
-
-	int post_id;
-	if (!match_path_format(request.url.path, "/posts/:n", &post_id)) {
-		sqlite3_stmt *stmt = sqlite3_utils_prepare(db, "SELECT title, content, author FROM Posts WHERE id=:i", post_id);
-		if (stmt == NULL) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		string title;
-		string content;
-		string author;
-		int res = sqlite3_utils_fetch(stmt, "sss", &title, &content, &author);
-		if (res == -1) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		if (res == 1) {
-			status_line(b, 404);
-			append_content_s(b, LIT("No such post"));
-			return;
-		}
-		assert(res == 0);
-		status_line(b, 200);
-		add_header(b, LIT("Content-Type: text/html"));
-		TemplateParam params[] = {
-			{.name=LIT("login"), .type=TPT_INT, .i=login_username.size>0},
-			{.name=LIT("login_username"), .type=TPT_STRING, .s=login_username},
-			{.name=LIT("title"), .type=TPT_STRING, .s=title},
-			{.name=LIT("author"), .type=TPT_STRING, .s=author},
-			{.name=LIT("content"), .type=TPT_STRING, .s=content},
-			{.name=NULLSTR, .type=TPT_LAST }
-		};
-		append_template(b, LIT("pages/post.html"), params);
-		sqlite3_finalize(stmt);
-		return;
-	}
-
-	if (!match_path_format(request.url.path, "/users")) {
-		sqlite3_stmt *stmt = sqlite3_utils_prepare(db, "SELECT name FROM Users");
-		if (stmt == NULL) {
-			status_line(b, 500);
-			return;
-		}
-		status_line(b, 200);
-		add_header(b, LIT("Content-Type: text/html"));
-		TemplateParam params[] = {
-			{.name=LIT("login"), .type=TPT_INT, .i=login_username.size>0},
-			{.name=LIT("login_username"), .type=TPT_STRING, .s=login_username},
-			{.name=LIT("users"), .type=TPT_QUERY, .q=stmt},
-			{.name=NULLSTR, .type=TPT_LAST }
-		};
-		append_template(b, LIT("pages/users.html"), params);
-		sqlite3_finalize(stmt);
-		return;
-	}
-
-	string profile_username;
-	if (!match_path_format(request.url.path, "/users/:s", &profile_username)) {
-		sqlite3_stmt *stmt = sqlite3_utils_prepare(db, "SELECT bio FROM Users WHERE name=:s", profile_username);
-		if (stmt == NULL) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		string bio;
-		int res = sqlite3_utils_fetch(stmt, "s", &bio);
-		if (res == -1) {
-			status_line(b, 500);
-			append_content_s(b, LIT("Internal error"));
-			return;
-		}
-		if (res == 1) {
-			status_line(b, 404);
-			append_content_s(b, LIT("No such user"));
-			return;
-		}
-		assert(res == 0);
-		status_line(b, 200);
-		add_header(b, LIT("Content-Type: text/html"));
-		TemplateParam params[] = {
-			{.name=LIT("login"), .type=TPT_INT, .i=login_username.size>0},
-			{.name=LIT("login_username"), .type=TPT_STRING, .s=login_username},
-			{.name=LIT("name"), .type=TPT_STRING, .s=profile_username},
-			{.name=LIT("bio"), .type=TPT_STRING, .s=bio},
-			{.name=NULLSTR, .type=TPT_LAST }
-		};
-		append_template(b, LIT("pages/user.html"), params);
-		sqlite3_finalize(stmt);
-		return;
-	}
-
-	if (!match_path_format(request.url.path, "/login")) {
-		if (login_username.size > 0) {
-			// Already logged in
-			status_line(b, 303);
-			add_header(b, LIT("Location: /home"));
-			return;
-		}
-		status_line(b, 200);
-		append_file(b, LIT("pages/login.html"));
-		return;
-	}
-
-	if (!match_path_format(request.url.path, "/signup")) {
-		if (login_username.size > 0) {
-			// Already logged in
-			status_line(b, 303);
-			add_header(b, LIT("Location: /home"));
-			return;
-		}
-		status_line(b, 200);
-		append_file(b, LIT("pages/signup.html"));
-		return;
-	}
-
-	if (!match_path_format(request.url.path, "/home")) {
-		status_line(b, 200);
-		append_file(b, LIT("pages/home.html"));
-		return;
-	}
-
-	if (serve_file_or_dir(b, LIT("/static"), LIT("static/"), request.url.path, NULLSTR, false))
-		return;
-
-	status_line(b, 404);
-	append_content_s(b, LIT("Nothing here :|"));
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// SESSIONS                                                                                ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-SessionID create_session(string name)
-{
-	int i = 0;
-	while (i < MAX_SESSIONS && sessions[i].id != NO_SESSION)
-		i++;
-	if (i == MAX_SESSIONS)
-		return NO_SESSION;
-
-	if (next_session_id == NO_SESSION)
-		next_session_id++;
-	SessionID id = next_session_id++;
-
-	if (name.size > sizeof(sessions[i].namebuf))
-		log_fatal(LIT("User name buffer is too small"));
-	memcpy(sessions[i].namebuf, name.data, name.size);
-
-	sessions[i].id = id;
-	sessions[i].name = (string) { sessions[i].namebuf, name.size };
-
-	return sessions[i].id;
-}
-
-void remove_session(SessionID id)
-{
-	assert(id != NO_SESSION);
-
-	int i = 0;
-	while (i < MAX_SESSIONS && sessions[i].id != id)
-		i++;
-	if (i == MAX_SESSIONS)
-		log_fatal(LIT("Trying to remove non existing session"));
-	sessions[i].id = NO_SESSION;
-	sessions[i].name = NULLSTR;
-	memset(sessions[i].namebuf, 0, sizeof(sessions[i].namebuf));
-}
-
-string name_from_session(SessionID id)
-{
-	assert(id != NO_SESSION);
-	for (int i = 0; i < MAX_SESSIONS; i++)
-		if (sessions[i].id == id)
-			return sessions[i].name;
-	return NULLSTR;
-}
-
-SessionID session_from_request(Request request)
-{
-	string sessid_str;
-	if (!get_cookie(&request, LIT("sessid"), &sessid_str))
-		return NO_SESSION;
-
-	SessionID id;
-	{
-		char  *src = sessid_str.data;
-		size_t len = sessid_str.size;
-		size_t i = 0;
-
-		while (i < len && is_space(src[i]))
-			i++;
-
-		if (i == len || !is_digit(src[i]))
-			return NO_SESSION;
-		uint32_t buf = 0;
-		do {
-			int d = src[i] - '0';
-			if (buf > (UINT32_MAX - d) / 10)
-				return NO_SESSION;
-			buf = buf * 10 + d;
-			i++;
-		} while (i < len && is_digit(src[i]));
-
-		while (i < len && is_space(src[i]))
-			i++;
-
-		if (i < len)
-			return NO_SESSION;
-
-		assert(sizeof(buf) == sizeof(SessionID));
-		assert(buf != 0 && buf != NO_SESSION);
-		id = buf;
-	}
-
-	return id;
-}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// REQUEST PARSER                                                                          ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 // TODO: Make sure every string in request is reasonaly long
-int parse_request_head(string str, Request *request)
+static int parse_request_head(string str, Request *request)
 {
 	char  *src = str.data;
     size_t len = str.size;
@@ -1252,7 +357,7 @@ int parse_request_head(string str, Request *request)
 	return P_OK;
 }
 
-bool find_header(Request *request, string name, string *value)
+static bool find_header(Request *request, string name, string *value)
 {
 	for (int i = 0; i < request->nheaders; i++)
 		if (string_match_case_insensitive(request->headers[i].name, name)) {
@@ -1262,7 +367,7 @@ bool find_header(Request *request, string name, string *value)
 	return false;
 }
 
-string get_status_string(int status)
+static string get_status_string(int status)
 {
 	switch(status)
 	{
@@ -1328,7 +433,7 @@ string get_status_string(int status)
 	return LIT("???");
 }
 
-size_t parse_content_length(string s)
+static size_t parse_content_length(string s)
 {
 	char  *src = s.data;
 	size_t len = s.size;
@@ -1358,7 +463,7 @@ size_t parse_content_length(string s)
 	return x;
 }
 
-int find_and_parse_transfer_encoding(Request *request)
+static int find_and_parse_transfer_encoding(Request *request)
 {
 	string value;
 	if (!find_header(request, LIT("Transfer-Encoding"), &value))
@@ -1418,7 +523,7 @@ int find_and_parse_transfer_encoding(Request *request)
 	return res;
 }
 
-void response_builder_init(ResponseBuilder *b, Connection *conn)
+static void response_builder_init(ResponseBuilder *b, Connection *conn)
 {
 	b->state = R_STATUS;
 	b->conn = conn;
@@ -1479,9 +584,9 @@ void add_header_f(ResponseBuilder *b, const char *fmt, ...)
 	add_header(b, (string) {buffer, num});
 }
 
-bool should_keep_alive(Connection *conn);
+static bool should_keep_alive(Connection *conn);
 
-void append_special_headers(ResponseBuilder *b)
+static void append_special_headers(ResponseBuilder *b)
 {
 	if (should_keep_alive(b->conn))
 		add_header(b, LIT("Connection: Keep-Alive"));
@@ -1613,7 +718,7 @@ bool append_file(ResponseBuilder *b, string file)
 	return true;
 }
 
-void response_builder_complete(ResponseBuilder *b)
+static void response_builder_complete(ResponseBuilder *b)
 {
 	if (b->state == R_COMPLETE)
 		return;
@@ -1647,7 +752,7 @@ void response_builder_complete(ResponseBuilder *b)
 	b->state = R_COMPLETE;
 }
 
-bool should_keep_alive(Connection *conn)
+static bool should_keep_alive(Connection *conn)
 {
 	// Don't keep alive if the peer doesn't want to
 	if (conn->keep_alive == false)
@@ -1668,12 +773,12 @@ bool should_keep_alive(Connection *conn)
 	return true;
 }
 
-uint64_t deadline_of(Connection *conn)
+static uint64_t deadline_of(Connection *conn)
 {
 	return conn->start_time + (conn->closing ? closing_timeout_sec : request_timeout_sec) * 1000;
 }
 
-bool respond_to_available_requests(Connection *conn)
+static bool respond_to_available_requests(Connection *conn)
 {
 	bool remove = false;
 
@@ -1701,7 +806,7 @@ bool respond_to_available_requests(Connection *conn)
 		Request request;
 		int res = parse_request_head((string) {src.data, head_length}, &request);
 
-		if (access_log) TIME("log_access") {
+		if (access_log) {
 			// Log access
 			time_t real_now_in_secs = real_now / 1000;
 			struct tm timeinfo;
@@ -1804,7 +909,8 @@ bool respond_to_available_requests(Connection *conn)
 		// Respond
 		ResponseBuilder builder;
 		response_builder_init(&builder, conn);
-		respond(request, &builder);
+		assert(respond_callback);
+		respond_callback(request, &builder);
 		response_builder_complete(&builder);
 		if (builder.failed)
 			remove = true;
@@ -1976,7 +1082,6 @@ bool update_connection_http(Connection *conn, struct pollfd *polldata)
 			return true;
 		if (respond_to_available_requests(conn))
 			return true;
-
 	}
 
 	// POLLOUT
@@ -2001,7 +1106,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 
 		int state = br_ssl_engine_current_state(cc);
 
-		if (state & BR_SSL_CLOSED) TIME("BR_SSL_CLOSED") {
+		if (state & BR_SSL_CLOSED) {
 			// Engine is finished, no more I/O (until next reset).
 			int error = br_ssl_engine_last_error(cc);
 			if (error != BR_ERR_OK) {
@@ -2014,7 +1119,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			return true;
 		}
 
-		if ((state & BR_SSL_SENDREC) && (polldata->revents & POLLOUT)) TIME("BR_SSL_SENDREC") {
+		if ((state & BR_SSL_SENDREC) && (polldata->revents & POLLOUT)) {
 			// Engine has some bytes to send to the peer
 			size_t len;
 			unsigned char *buf = br_ssl_engine_sendrec_buf(cc, &len);
@@ -2038,7 +1143,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			flushed = false;
 		}
 
-		if ((state & BR_SSL_RECVAPP)) TIME("BR_SSL_RECVAPP") {
+		if ((state & BR_SSL_RECVAPP)) {
 			// Engine has obtained some application data from the 
 			// peer, that should be read by the caller.
 			size_t len;
@@ -2059,7 +1164,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			flushed = false;
 		}
 
-		if ((state & BR_SSL_RECVREC) && (polldata->revents & POLLIN)) TIME("BR_SSL_RECVREC") {
+		if ((state & BR_SSL_RECVREC) && (polldata->revents & POLLIN)) {
 			// Engine expects some bytes from the peer
 			size_t len;
 			unsigned char *buf = br_ssl_engine_recvrec_buf(cc, &len);
@@ -2086,7 +1191,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			flushed = false;
 		}
 
-		if ((state & BR_SSL_SENDAPP) && byte_queue_size(&conn->output) > 0) TIME("BR_SSL_SENDAPP") {
+		if ((state & BR_SSL_SENDAPP) && byte_queue_size(&conn->output) > 0) {
 			// Engine may receive application data to send (or flush).
 			size_t len;
 			unsigned char *buf = br_ssl_engine_sendapp_buf(cc, &len);
@@ -2120,25 +1225,124 @@ bool update_connection(Connection *conn, struct pollfd *polldata)
 {
 	bool ok;
 
-	TIME("update") {
 #if HTTPS
-		if (conn->https)
-			TIME("update-https") ok = update_connection_https(conn, polldata);
-		else
+	if (conn->https)
+		ok = update_connection_https(conn, polldata);
+	else
 #endif
-		TIME("update-http") ok = update_connection_http(conn, polldata);
-	}
+		ok = update_connection_http(conn, polldata);
 
 	return ok;
 }
 
-#ifndef NOMAIN
-int main(int argc, char **argv)
+void http_stop(void)
 {
-	init_globals(argc, argv);
+	stop = 1;
+}
 
-	DEBUG("Globals initialized\n");
+HTTPConfig http_default_config(void)
+{
+	return (HTTPConfig) {
+		.http_port = 8080,
+		.http_addr = LIT("127.0.0.1"),
+		.https_port = 8081,
+		.https_addr = LIT("127.0.0.1"),
+		.cert_file = NULLSTR,
+		.privkey_file = NULLSTR,
+		.access_log = true,
+		.show_io = false,
+		.show_requests = false,
+		.max_connections = 512,
+		.keep_alive_max_requests = 1000,
+		.connection_timeout_sec = 60,
+		.closing_timeout_sec = 2,
+		.request_timeout_sec = 5,
+		.log_flush_timeout_sec = 3,
+		.respond = NULL,
+	};
+}
 
+void http_init(HTTPConfig config)
+{
+	show_io                 = config.show_io;
+	show_requests           = config.show_requests;
+	access_log              = config.access_log;
+	keep_alive_max_requests = config.keep_alive_max_requests;
+	connection_timeout_sec  = config.connection_timeout_sec;
+	closing_timeout_sec     = config.closing_timeout_sec;
+	request_timeout_sec     = config.request_timeout_sec;
+	log_flush_timeout_sec   = config.log_flush_timeout_sec;
+	respond_callback        = config.respond;
+
+	{
+		struct rlimit file_desc_limit;
+		if (getrlimit(RLIMIT_NOFILE, &file_desc_limit))
+			log_fatal(LIT("Couldn't query RLIMIT_NOFILE\n"));
+
+		max_conns = config.max_connections;
+		num_conns = 0;
+		if ((size_t) max_conns+2 > file_desc_limit.rlim_cur)
+			log_fatal(LIT("max_connections+2 is higher than the rlimit\n"));
+
+		conns = mymalloc(max_conns * sizeof(Connection));
+		if (conns == NULL)
+			log_fatal(LIT("Out of memory"));
+
+		for (int i = 0; i < max_conns; i++) {
+			conns[i].fd = -1;
+			byte_queue_init(&conns[i].input);
+			byte_queue_init(&conns[i].output);
+		}
+
+		pollarray = mymalloc((max_conns+2) * sizeof(struct pollfd));
+		if (pollarray == NULL)
+			log_fatal(LIT("Out of memory"));
+
+		DEBUG("Connection array created\n");
+	}
+
+	// Create plain text listener
+	{
+		string   http_addr = config.http_addr;
+		uint32_t http_port = config.http_port;
+		insecure_fd = create_listening_socket(http_addr, http_port);
+		if (insecure_fd < 0)
+			log_fatal(LIT("Couldn't bind\n"));
+		log_format("Listening on %.*s:%d\n", (int) http_addr.size, http_addr.data, http_port);
+		DEBUG("HTTP started\n");
+	}
+
+	// Create secure listener
+	{
+		secure_fd = -1;
+#if HTTPS
+		string   https_addr = config.https_addr;
+		uint32_t https_port = config.https_port;
+		string   https_cert_file = config.cert_file;
+		string   https_key_file  = config.privkey_file;
+
+		secure_fd = create_listening_socket(https_addr, https_port);
+		if (secure_fd < 0)
+			log_fatal(LIT("Couldn't bind\n"));
+		log_format("Listening on %.*s:%d\n", (int) https_addr.size, https_addr.data, https_port);
+
+		// Load certificate
+		if (!load_certs_from_file(https_cert_file, &certs))
+			log_fatal(LIT("Couldn't load certificates\n"));
+		DEBUG("Certificates loaded\n");
+
+		// Load private key
+		if (!load_private_key_from_file(https_key_file, &pkey))
+			log_fatal(LIT("Couldn't load private key\n"));
+		DEBUG("Private key loaded\n");
+
+		DEBUG("HTTPS started\n");
+#endif
+	}
+}
+
+void http_loop(void)
+{
 	uint64_t last_log_time = 0;
 	while (!stop) {
 
@@ -2158,7 +1362,7 @@ int main(int argc, char **argv)
 			if (errno == EINTR)
 				break; // TODO: Should this be continue?
 			log_perror(LIT("poll"));
-			return -1;
+			exit(-1);
 		}
 
 		now = get_monotonic_time_ms();
@@ -2222,11 +1426,30 @@ int main(int argc, char **argv)
 		}
 
 	} /* main loop end */
-
-	free_globals();
-	return 0;
 }
+
+void http_free(void)
+{
+	{
+#if HTTPS
+		free_private_key(&pkey);
+		free_certs(&certs);
+		close(secure_fd);
 #endif
+
+		close(insecure_fd);
+
+		for (int i = 0; i < max_conns; i++) {
+			if (conns[i].fd != -1) {
+				close(conns[i].fd);
+				byte_queue_free(&conns[i].input);
+				byte_queue_free(&conns[i].output);
+			}
+		}
+		myfree(conns, max_conns * sizeof(Connection));
+		myfree(pollarray, (max_conns+2) * sizeof(struct pollfd));
+	}
+}
 
 #define PATH_SEP '/'
 
@@ -2546,520 +1769,6 @@ bool serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot,
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// LOGGER                                                                                  ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-bool   log_initialized = false;
-int    log_last_file_index = 0;
-int    log_fd = -1;
-char  *log_buffer = NULL;
-size_t log_buffer_used = 0;
-size_t log_buffer_size = 0;
-bool   log_failed = false;
-size_t log_total_size = 0;
-size_t log_dir_limit_mb = 0;
-size_t log_file_limit_b = 0;
-char   log_dir[1<<12];
-
-void log_choose_file_name(char *dst, size_t max, bool startup)
-{
-	size_t prev_size = -1;
-	for (;;) {
-
-		int num = snprintf(dst, max, "%s/log_%d.txt", log_dir, log_last_file_index);
-		if (num < 0 || (size_t) num >= max) {
-			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-			log_failed = true;
-			return;
-		}
-		dst[num] = '\0';
-
-		struct stat buf;
-		if (stat(dst, &buf)) {
-			if (errno == ENOENT)
-				break;
-			write_format_to_stderr("log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
-			log_failed = true;
-			return;
-		}
-		prev_size = (size_t) buf.st_size;
-
-		if (log_last_file_index == 100000000) {
-			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-			log_failed = true;
-			return;
-		}
-		log_last_file_index++;
-	}
-
-	// At startup don't create a new log file if the last one didn't reache its limit
-	if (startup && prev_size < log_file_limit_b) {
-
-		log_last_file_index--;
-
-		int num = snprintf(dst, max, "%s/log_%d.txt", log_dir, log_last_file_index);
-		if (num < 0 || (size_t) num >= max) {
-			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-			log_failed = true;
-			return;
-		}
-		dst[num] = '\0';
-	}
-}
-
-void log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffer_size)
-{
-	// Copy args to "local" variables
-	if (dir.size >= sizeof(log_dir))
-		log_fatal(LIT("Log directory is too long\n"));
-	memcpy(log_dir, dir.data, dir.size);
-	log_dir[dir.size] = '\0';
-	log_buffer_size = buffer_size;
-	log_dir_limit_mb = dir_limit_mb;
-	log_file_limit_b = file_limit_b;
-
-	log_buffer = mymalloc(log_buffer_size);
-	if (log_buffer == NULL) {
-		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-		log_failed = true;
-		return;
-	}
-
-	if (mkdir(log_dir, 0755) && errno != EEXIST) {
-		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-		log_failed = true;
-		return;
-	}
-
-	char name[1<<12];
-	log_choose_file_name(name, sizeof(name), true);
-	if (log_failed) return; 
-
-	log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
-	if (log_fd < 0) {
-		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-		log_failed = true;
-		return;
-	}
-
-	log_total_size = 0;
-
-	DIR *d = opendir(log_dir);
-	if (d == NULL) {
-		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-		log_failed = true;
-		return;
-	}
-	struct dirent *dir_entry;
-	while ((dir_entry = readdir(d))) {
-
-		if (!strcmp(dir_entry->d_name, ".") || !strcmp(dir_entry->d_name, ".."))
-			continue;
-
-		char path[1<<12];
-		int k = snprintf(path, SIZEOF(path), "%s/%s", log_dir, dir_entry->d_name);
-		if (k < 0 || k >= SIZEOF(path)) log_fatal(LIT("Bad format"));
-		path[k] = '\0';
-
-		struct stat buf;
-		if (stat(path, &buf))
-			log_fatal(LIT("Couldn't stat log file"));
-
-		if ((size_t) buf.st_size > SIZE_MAX - log_total_size)
-			log_fatal(LIT("Log file is too big"));
-		log_total_size += (size_t) buf.st_size;
-	}
-	closedir(d);
-
-	static_assert(SIZEOF(size_t) > 4, "It's assumed size_t can store a number of bytes in the order of 10gb");
-	if (log_total_size > log_dir_limit_mb * 1024 * 1024) {
-		write_string_to_stderr(LIT("Log reached disk limit at startup\n"));
-		log_failed = true;
-		return;
-	}
-
-	log_initialized = true;
-}
-
-void log_free(void)
-{
-	if (log_initialized) {
-		log_flush();
-		if (log_fd > -1)
-			close(log_fd);
-		myfree(log_buffer, log_buffer_size);
-		log_fd = -1;
-		log_buffer = NULL;
-		log_buffer_used = 0;
-		log_buffer_size = 0;
-		log_failed = false;
-		log_file_limit_b = 0;
-		log_dir_limit_mb = 0;
-		log_dir[0] = '\0';
-		log_initialized = false;
-	}
-}
-
-bool log_empty(void)
-{
-	return log_failed || log_buffer_used == 0;
-}
-
-void log_flush(void)
-{
-	if (!log_initialized || log_failed || log_buffer_used == 0)
-		return;
-
-	/*
-	 * Rotate the file if the limit was reached
-	 */
-	struct stat buf;
-	if (fstat(log_fd, &buf)) {
-		write_format_to_stderr("log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
-		log_failed = true;
-		return;
-	}
-
-	if (buf.st_size + log_buffer_used >= log_file_limit_b) {
-
-		char name[1<<12];
-		log_choose_file_name(name, SIZEOF(name), false);
-		if (log_failed) return; 
-
-		close(log_fd);
-		log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
-		if (log_fd < 0) {
-			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-			log_failed = true;
-			return;
-		}
-	}
-
-	/*
-	 * Buffer is full. We need to flush it to continue
-	 */
-	int zeros = 0;
-	size_t copied = 0;
-	while (copied < log_buffer_used) {
-
-		int num = write(log_fd, log_buffer + copied, log_buffer_used - copied);
-		if (num < 0) {
-			if (errno == EINTR)
-				continue;
-			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-			log_failed = true;
-			return;
-		}
-
-		if (num == 0) {
-			zeros++;
-			if (zeros == 1000) {
-				write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-				log_failed = true;
-				return;
-			}
-		} else {
-			zeros = 0;
-		}
-
-		copied += num;
-		log_total_size += num;
-
-		if (log_total_size > log_dir_limit_mb * 1024 * 1024) {
-			write_string_to_stderr(LIT("Log reached disk limit\n"));
-			log_failed = true;
-			return;
-		}
-	}
-
-	assert(copied == log_buffer_used);
-	log_buffer_used = 0;
-}
-
-void log_fatal(string str)
-{
-	log_data(str);
-	exit(-1);
-}
-
-void log_format(const char *fmt, ...)
-{
-	if (!log_initialized) {
-		va_list args;
-		va_start(args, fmt);
-		write_format_to_stderr_va(fmt, args);
-		va_end(args);
-		return;
-	}
-
-	if (log_failed)
-		return;
-
-	if (log_buffer_used == log_buffer_size) {
-		log_flush();
-		if (log_failed) return;
-	}
-
-	int num;
-	{
-		va_list args;
-		va_start(args, fmt);
-		num = vsnprintf(log_buffer + log_buffer_used, log_buffer_size - log_buffer_used, fmt, args);
-		va_end(args);
-	}
-
-	if (num < 0 || (size_t) num > log_buffer_size) {
-		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
-		log_failed = true;
-		return;
-	}
-
-	if ((size_t) num > log_buffer_size - log_buffer_used) {
-		
-		log_flush();
-		if (log_failed) return;
-
-		va_list args;
-		va_start(args, fmt);
-		int k = vsnprintf(log_buffer + log_buffer_used, log_buffer_size - log_buffer_used, fmt, args);
-		va_end(args);
-
-		if (k != num) log_fatal(LIT("Bad format"));
-	}
-
-	log_buffer_used += num;
-}
-
-void log_data(string str)
-{
-	if (!log_initialized) {
-		fwrite(str.data, 1, str.size, stdout);
-		return;
-	}
-
-	if (log_failed)
-		return;
-
-	if (str.size > log_buffer_size)
-		str = LIT("Log message was too long to log");
-
-	if (str.size > log_buffer_size - log_buffer_used) {
-		log_flush();
-		if (log_failed) return;
-	}
-	assert(str.size <= log_buffer_size - log_buffer_used);
-
-	assert(log_buffer);
-	memcpy(log_buffer + log_buffer_used, str.data, str.size);
-	log_buffer_used += str.size;
-}
-
-void log_perror(string str)
-{
-	if (!log_initialized)
-		write_format_to_stderr("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
-	else
-		log_format("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// BASIC UTILITIES                                                                         ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-uint64_t timespec_to_ms(struct timespec ts)
-{
-	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000)
-		log_fatal(LIT("Time overflow\n"));
-	uint64_t ms = ts.tv_sec * 1000;
-
-	uint64_t nsec_part = ts.tv_nsec / 1000000;
-	if (ms > UINT64_MAX - nsec_part)
-		log_fatal(LIT("Time overflow\n"));
-	ms += nsec_part;
-	return ms;
-}
-
-uint64_t timespec_to_ns(struct timespec ts)
-{
-	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000000000)
-		log_fatal(LIT("Time overflow\n"));
-	uint64_t ns = ts.tv_sec * 1000000000;
-
-	if (ns > UINT64_MAX - ts.tv_nsec)
-		log_fatal(LIT("Time overflow\n"));
-	ns += ts.tv_nsec;
-	return ns;
-}
-
-uint64_t get_monotonic_time_ms(void)
-{
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
-	return timespec_to_ms(ts);
-}
-
-uint64_t get_monotonic_time_ns(void)
-{
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
-	return timespec_to_ns(ts);
-}
-
-uint64_t get_real_time_ms(void)
-{
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_REALTIME, &ts);
-	if (ret) log_fatal(LIT("Couldn't read real time\n"));
-	return timespec_to_ms(ts);
-}
-
-bool string_match_case_insensitive(string x, string y)
-{
-	if (x.size != y.size)
-		return false;
-	for (size_t i = 0; i < x.size; i++)
-		if (to_lower(x.data[i]) != to_lower(y.data[i]))
-			return false;
-	return true;
-}
-
-char to_lower(char c)
-{
-	if (c >= 'A' && c <= 'Z')
-		return c - 'A' + 'a';
-	else
-		return c;
-}
-
-string trim(string s)
-{
-	size_t cur = 0;
-	while (cur < s.size && is_space(s.data[cur]))
-		cur++;
-
-	if (cur == s.size) {
-		s.data = "";
-		s.size = 0;
-	} else {
-		s.data += cur;
-		s.size -= cur;
-		while (is_space(s.data[s.size-1]))
-			s.size--;
-	}
-	return s;
-}
-
-string substr(string str, size_t start, size_t end)
-{
-	return (string) {
-		.data = str.data + start,
-		.size = end - start,
-	};
-}
-
-bool is_digit(char c)
-{
-	return c >= '0' && c <= '9';
-}
-
-bool is_alpha(char c)
-{
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
-bool is_space(char c)
-{
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-bool is_print(char c)
-{
-	return c >= 32 && c < 127;
-}
-
-bool is_pcomp(char c)
-{
-	return c != '/' && c != ':' && is_print(c);
-}
-
-bool streq(string s1, string s2)
-{
-	// TODO: What is s1.data or s2.data is NULL?
-	return s1.size == s2.size && !memcmp(s1.data, s2.data, s1.size);
-}
-
-bool startswith(string prefix, string str)
-{
-	if (prefix.size > str.size)
-		return false;
-	// TODO: What is prefix.data==NULL or str.data==NULL?
-	return !memcmp(prefix.data, str.data, prefix.size);
-}
-
-bool endswith(string suffix, string name)
-{
-	char *tail = name.data + (name.size - suffix.size);
-	return suffix.size <= name.size && !memcmp(tail, suffix.data, suffix.size);
-}
-
-bool load_file_contents(string file, string *out)
-{
-	char copy[1<<12];
-	if (file.size >= sizeof(copy)) {
-		log_data(LIT("File path is larger than the static buffer\n"));
-		return false;
-	}
-	memcpy(copy, file.data, file.size);
-	copy[file.size] = '\0';
-
-	int fd = open(copy, O_RDONLY);
-	if (fd < 0)
-		return false;
-
-	struct stat buf;
-	if (fstat(fd, &buf) || !S_ISREG(buf.st_mode)) {
-		log_data(LIT("Couldn't stat file or it's not a regular file\n"));
-		close(fd);
-		return false;
-	}
-	size_t size = (size_t) buf.st_size;
-
-	char *str = mymalloc(size);
-	if (str == NULL) {
-		log_data(LIT("out of memory\n"));
-		close(fd);
-		return false;
-	}
-
-	size_t copied = 0;
-	while (copied < size) {
-		int n = read(fd, str + copied, size - copied);
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			log_perror(LIT("read"));
-			close(fd);
-			myfree(str, size);
-			return false;
-		}
-		if (n == 0)
-			break; // EOF
-		copied += n;
-	}
-	if (copied != size) {
-		log_format("Read %zu bytes from file but %zu were expected\n", copied, size);
-		return false;
-	}
-
-	close(fd);
-
-	*out = (string) {str, size};
-	return true;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
 /// BYTE QUEUE                                                                              ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -3339,436 +2048,6 @@ bool set_blocking(int fd, bool blocking)
 		return false;
 
 	return true;
-}
-
-bool write_string_to_stderr(string s)
-{
-	int fd = STDERR_FILENO;
-	size_t num = 0;
-	while (num < s.size) {
-		int ret = write(fd, s.data + num, s.size - num);
-		if (ret < 0) {
-			if (errno == EINTR)
-				continue;
-			return false;
-		}
-		num += ret;
-	};
-	return true;
-}
-
-bool write_format_to_stderr_va(const char *fmt, va_list args)
-{
-	char buf[1<<10];
-
-	int num = vsnprintf(buf, sizeof(buf), fmt, args);
-	if (num < 0) log_fatal(LIT("Invalid format"));
-
-	string str = {buf, num};
-	return write_string_to_stderr(str);
-}
-
-bool write_format_to_stderr(const char *fmt, ...)
-{
-	va_list args;
-	va_start(args, fmt);
-	bool ok = write_format_to_stderr_va(fmt, args);
-	va_end(args);
-	return ok;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// PROFILING                                                                               ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-#if PROFILE
-typedef struct {
-	string label;
-	uint64_t delta_cycles;
-	uint64_t exec_count;
-} TimedScope;
-
-TimedScope timed_scopes[__COUNTER__+1]; // +1 is just to avoid the zero length array
-uint64_t timing_init_time_ns;
-uint64_t timing_init_time_cycles;
-
-void timing_init(void)
-{
-	timing_init_time_ns = get_monotonic_time_ns();
-	timing_init_time_cycles = __rdtsc();
-}
-
-void human_readable_time_interval(uint64_t ns, char *dst, size_t max)
-{
-    if (ns > 1000000000)
-        snprintf(dst, max, "%.1Lf s", (long double) ns / 1000000000);
-    else if (ns > 1000000)
-        snprintf(dst, max, "%.1Lf ms", (long double) ns / 1000000);
-    else if (ns > 1000)
-        snprintf(dst, max, "%.1Lf us", (long double) ns / 1000);
-    else
-        snprintf(dst, max, "%.1Lf ns", (long double) ns);
-}
-
-void timing_print_results(void)
-{
-	uint64_t end_cycles = __rdtsc();
-	uint64_t end_ns = get_monotonic_time_ns();
-
-	double cy2ns = (double) (end_ns - timing_init_time_ns) / (end_cycles - timing_init_time_cycles);
-
-	write_format_to_stderr("Printing timing results\n");
-	for (int i = 0; i < COUNTOF(timed_scopes); i++) {
-		TimedScope scope = timed_scopes[i];
-		if (scope.exec_count == 0)
-			continue;
-
-		char total_str[128];
-		char average_str[128];
-		human_readable_time_interval(cy2ns * scope.delta_cycles, total_str, sizeof(total_str));
-		human_readable_time_interval(cy2ns * scope.delta_cycles / scope.exec_count, average_str, sizeof(average_str));
-
-		write_format_to_stderr("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
-			(int) scope.label.size, scope.label.data,
-			total_str, average_str, scope.exec_count);
-	}
-}
-
-void timing_result(int scope_index, uint64_t delta_cycles, string label)
-{
-	timed_scopes[scope_index].label = label;
-	timed_scopes[scope_index].delta_cycles += delta_cycles;
-	timed_scopes[scope_index].exec_count++;
-}
-#endif
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// ALLOCATORS                                                                              ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-#if EOPALLOC
-void *mymalloc(size_t num)
-{
-	int page_size = sysconf(_SC_PAGE_SIZE);
-
-	size_t num_pages = (num + page_size - 1) / page_size;
-	assert(num_pages > 0);
-
-	void *addr = mmap(NULL, (num_pages + 1) * page_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-	if (addr == MAP_FAILED)
-		return NULL;
-
-	void *head_page = addr;
-	addr = (char*) addr + page_size;
-
-	if (mprotect(head_page, page_size, PROT_NONE)) {
-		log_perror(LIT("mprotect"));
-		exit(-1);
-	}
-
-	return addr;
-}
-
-void myfree(void *ptr, size_t num)
-{
-	if (ptr == NULL)
-		return;
-
-	int page_size = sysconf(_SC_PAGE_SIZE);
-	size_t num_pages = (num + page_size - 1) / page_size;
-
-	void *head_page = (char*) ptr - page_size;
-
-	munmap(head_page, (num_pages + 1) * page_size);
-}
-
-#else
-
-void *mymalloc(size_t num)
-{
-	return malloc(num);
-}
-
-void myfree(void *ptr, size_t num)
-{
-	(void) num;
-	free(ptr);
-}
-#endif
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// CONFIGURATION PARSER                                                                    ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef enum {
-	CE_INT,
-	CE_STR,
-	CE_BOOL,
-} ConfigEntryType;
-
-typedef struct {
-	string name;
-	ConfigEntryType type;
-	union {
-		uint32_t num;
-		string   txt;
-		bool     yes;
-	};
-} ConfigEntry;
-
-string       config_content;
-ConfigEntry *config_entries;
-int          config_count;
-int          config_capacity;
-
-void make_char_printable(char *buf, size_t max, char c)
-{
-	(void) max;
-
-	if (is_print(c)) {
-		assert(max >= 4);
-		buf[0] = '\'';
-		buf[1] = c;
-		buf[2] = '\'';
-		buf[3] = '\0';
-	} else {
-		assert(max >= 5);
-		static const char hextable[] = "0123456789abcdef";
-		buf[0] = '0';
-		buf[1] = 'x';
-		buf[2] = hextable[(uint8_t) c >> 4];
-		buf[3] = hextable[c & 0xf];
-		buf[4] = '\0';
-	}
-}
-
-bool config_parse(string content)
-{
-	char  *src = content.data;
-	size_t len = content.size;
-	size_t cur = 0;
-
-	bool error = false;
-	for (;;) {
-
-		// Skip whitespace before the entry
-		while (cur < len && is_space(src[cur]))
-			cur++;
-		
-		if (cur == len)
-			break;
-		
-		if (src[cur] == '#') {
-			// Comment
-			while (cur < len && src[cur] != '\n')
-				cur++;
-			if (cur < len) {
-				assert(src[cur] == '\n');
-				cur++;
-			}
-		} else {
-		
-			// Expecting an identifier
-			if (!is_alpha(src[cur]) && src[cur] != '_') {
-				char buf[5];
-				make_char_printable(buf, sizeof(buf), src[cur]);
-				// Configs are handled before logging, so we need to write to stderr here
-				log_format("Could not parse config file (invalid character %s)\n", buf);
-				error = true;
-				break;
-			}
-
-			ConfigEntry entry;
-
-			size_t name_start = cur;
-			do
-				cur++;
-			while (cur < len && (is_alpha(src[cur]) || is_digit(src[cur]) || src[cur] == '_'));
-			entry.name = substr(content, name_start, cur);
-
-			while (cur < len && is_space(src[cur]) && src[cur] != '\n')
-				cur++;
-
-			if (cur == len) {
-				log_format("Missing value after '%.*s' in config file\n", (int) entry.name.size, entry.name.data);
-				error = true;
-				break;
-			}
-
-			if (cur+2 < len
-				&& src[cur+0] == 'y'
-				&& src[cur+1] == 'e'
-				&& src[cur+2] == 's'
-				&& (cur+3 == len || is_space(src[cur+3]))) {
-				entry.type = CE_BOOL;
-				entry.yes = true;
-				cur += 3;
-			} else if (cur+1 < len
-				&& src[cur+0] == 'n'
-				&& src[cur+1] == 'o'
-				&& (cur+2 == len || is_space(src[cur+2]))) {
-				entry.type = CE_BOOL;
-				entry.yes = false;
-				cur += 2;
-			} else if (src[cur] == '"') {
-				cur++; // Skip the first double quote
-				size_t value_start = cur;
-				while (cur < len && src[cur] != '"')
-					cur++;
-				entry.type = CE_STR;
-				entry.txt = substr(content, value_start, cur);
-				if (cur < len) {
-					assert(src[cur] == '"');
-					cur++;
-				}
-			} else if (is_digit(src[cur])) {
-				uint32_t value = 0;
-				do {
-					int d = src[cur] - '0';
-					if (value > (UINT32_MAX - d) / 10) {
-						log_format("Invalid value after '%.*s' in config file (Integer is too big)\n", (int) entry.name.size, entry.name.data);
-						error = true;
-						break;
-					}
-					value = value * 10 + d;
-					cur++;
-				} while (cur < len && is_digit(src[cur]));
-				if (error) break;
-				entry.type = CE_INT;
-				entry.num = value;
-			} else {
-				size_t value_start = cur;
-				while (cur < len && (is_print(src[cur]) && !is_space(src[cur])))
-					cur++;
-				entry.type = CE_STR;
-				entry.txt = substr(content, value_start, cur);
-			}
-
-			if (config_count == config_capacity) {
-				int   new_cap = MAX(2 * config_capacity, 32);
-				void *new_ptr = mymalloc(new_cap * sizeof(ConfigEntry));
-				if (new_ptr == NULL) {
-					log_format("Couldn't load config file (out of memory)\n");
-					error = true;
-					break;
-				}
-				if (config_count > 0)
-					memcpy(new_ptr, config_entries, config_count * sizeof(ConfigEntry));
-				myfree(config_entries, config_capacity * sizeof(ConfigEntry));
-				config_entries = new_ptr;
-				config_capacity = new_cap;
-			}
-			config_entries[config_count++] = entry;
-
-			// Skip the rest of the line
-			while (cur < len && is_space(src[cur]) && src[cur] != '\n')
-				cur++;
-
-			if (cur < len && src[cur] == '#')
-				while (cur < len && src[cur] != '\n')
-					cur++;
-			
-			if (cur < len) {
-				if (src[cur] != '\n') {
-					char buf[5];
-					make_char_printable(buf, sizeof(buf), src[cur]);
-					log_format("Invalid character %s after '%.*s' entry in config file\n", buf, (int) entry.name.size, entry.name.data);
-					error = true;
-					break;
-				}
-				cur++;
-			}
-		}
-	}
-
-	if (error) config_free();
-	return !error;
-}
-
-void config_init(void)
-{
-	config_content  = NULLSTR;
-	config_entries  = NULL;
-	config_count    = 0;
-	config_capacity = 0;
-}
-
-bool config_load(string file)
-{
-	config_init();
-
-	if (!load_file_contents(file, &config_content))
-		log_fatal(LIT("Could not load config file\n"));
-
-	if (!config_parse(config_content)) {
-		return false;
-	}
-
-	return true;
-}
-
-void config_free(void)
-{
-	if (config_entries) {
-		myfree(config_content.data, config_content.size);
-		myfree(config_entries, config_capacity * sizeof(ConfigEntry));
-		config_content  = NULLSTR;
-		config_entries  = NULL;
-		config_count    = 0;
-		config_capacity = 0;
-	}
-}
-
-ConfigEntry *config_any(string name)
-{
-	for (int i = 0; i < config_count; i++)
-		if (streq(name, config_entries[i].name))
-			return &config_entries[i];
-	return NULL;
-}
-
-string config_string(string name)
-{
-	ConfigEntry *entry = config_any(name);
-	if (entry == NULL) {
-		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
-		exit(-1);
-	}
-	if (entry->type != CE_STR) {
-		log_format("Config entry '%.*s' is not a string\n", (int) name.size, name.data);
-		exit(-1);
-	}
-	return entry->txt;
-}
-
-uint32_t config_int(string name)
-{
-	ConfigEntry *entry = config_any(name);
-	if (entry == NULL) {
-		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
-		exit(-1);
-	}
-	if (entry->type != CE_INT) {
-		log_format("Config entry '%.*s' is not a string\n", (int) name.size, name.data);
-		exit(-1);
-	}
-
-	return entry->num;
-}
-
-bool config_bool(string name)
-{
-	ConfigEntry *entry = config_any(name);
-	if (entry == NULL) {
-		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
-		exit(-1);
-	}
-	if (entry->type != CE_BOOL) {
-		log_format("Config entry '%.*s' is not a boolean\n", (int) name.size, name.data);
-		exit(-1);
-	}
-
-	return entry->yes;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -4485,7 +2764,7 @@ static bool follows_authority(string str, size_t i)
 		&& str.data[i+1] == '/';
 }
 
-bool url_parse2(string str, size_t *i, url_t *url)
+static bool url_parse2(string str, size_t *i, url_t *url)
 {
 	char  *src = str.data;
 	size_t len = str.size;
@@ -4543,20 +2822,20 @@ bool url_parse2(string str, size_t *i, url_t *url)
 	return true;
 }
 
-bool url_parse(string str, url_t *url)
+static bool url_parse(string str, url_t *url)
 {
 	size_t i = 0;
 	bool result = url_parse2(str, &i, url);
 	return result && i == str.size;
 }
 
-bool url_parse_ipv4(string str, uint32_t *out)
+static bool url_parse_ipv4(string str, uint32_t *out)
 {
 	size_t i = 0;
 	return parse_ipv4(str, &i, out);
 }
 
-bool url_parse_ipv6(string str, uint16_t out[8])
+static bool url_parse_ipv6(string str, uint16_t out[8])
 {
 	size_t i = 0;
 	return parse_ipv6(str, &i, out);
@@ -4566,7 +2845,7 @@ bool url_parse_ipv6(string str, uint16_t out[8])
 /// URI PARSER                                                                              ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-bool hex_to_num(char x, int *n)
+static bool hex_to_num(char x, int *n)
 {
 	// TODO: This is inefficient
 	if      (x >= 'A' && x <= 'F') *n = x - 'A';
@@ -4576,7 +2855,7 @@ bool hex_to_num(char x, int *n)
 	return true;
 }
 
-size_t skip_any_valid_chars_not_percent_encoded(string src, size_t cur)
+static size_t skip_any_valid_chars_not_percent_encoded(string src, size_t cur)
 {
 	while (cur < src.size
 		&& src.data[cur] != '=' // Start of the value
@@ -4590,7 +2869,7 @@ size_t skip_any_valid_chars_not_percent_encoded(string src, size_t cur)
 
 // This function is like the "parse" version but doesn't
 // return the decoded string.
-bool skip_percent_encoded_substr(string src, size_t *cur_)
+static bool skip_percent_encoded_substr(string src, size_t *cur_)
 {
 	size_t cur = *cur_;
 	cur = skip_any_valid_chars_not_percent_encoded(src, cur);
@@ -4616,7 +2895,7 @@ bool skip_percent_encoded_substr(string src, size_t *cur_)
 // slice (out) may point into the source string or the
 // destination buffer (dst). It only returns false if copying
 // was required and the buffer was too small.
-bool parse_percent_encoded_substr(string src, string dst, size_t *cur_, string *out)
+static bool parse_percent_encoded_substr(string src, string dst, size_t *cur_, string *out)
 {
 	size_t cur = *cur_;
 	size_t start = cur;
@@ -4734,7 +3013,7 @@ bool get_query_string_param(string str, string key, string dst, string *out)
 /// COOKIE PARSER                                                                           ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-bool is_cookie_name(char c)
+static bool is_cookie_name(char c)
 {
 	return (c >= 'a' && c <= 'z')
 		|| (c >= 'A' && c <= 'Z')
@@ -4742,7 +3021,7 @@ bool is_cookie_name(char c)
 		|| c == '_' || c == '-';
 }
 
-bool is_cookie_value(char c)
+static bool is_cookie_value(char c)
 {
 	return (c >= 'a' && c <= 'z')
 		|| (c >= 'A' && c <= 'Z')
@@ -4813,338 +3092,6 @@ bool get_cookie(Request *request, string name, string *out)
 	}
 
 	return false;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// TEMPLATE EVALUATION                                                                     ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef struct {
-	ResponseBuilder *b;
-	TemplateParam *params;
-} TemplateContext;
-
-void template_output_callback(void *userp, const char *str, size_t len)
-{
-	TemplateContext *c = userp;
-	append_content_s(c->b, (string) {str, len});
-}
-
-bool template_sqlstmt_param_callback(void *data, const char *key_, size_t len, tinytemplate_value_t *value)
-{
-	string key = {key_, len};
-	sqlite3_stmt *stmt = data;
-	int column_count = sqlite3_column_count(stmt);
-	bool found = false;
-	for (int i = 0; i < column_count; i++) {
-		const char *tmp = sqlite3_column_name(stmt, i);
-		string column_name = STR(tmp);
-		if (streq(column_name, key)) {
-			switch (sqlite3_column_type(stmt, i)) {
-				case SQLITE_INTEGER: tinytemplate_set_int(value, sqlite3_column_int(stmt, i)); break;
-				case SQLITE_FLOAT  : tinytemplate_set_float(value, sqlite3_column_double(stmt, i)); break;
-				case SQLITE_TEXT   : tinytemplate_set_string(value, (char*) sqlite3_column_text(stmt, i), sqlite3_column_bytes(stmt, i)); break;
-				case SQLITE_BLOB   : log_fatal(LIT("Can't provide a BLOB column to a template")); break;
-				case SQLITE_NULL   : log_fatal(LIT("Can't provide a NULL column to a template")); break;
-			}
-			found = true;
-			break;
-		}
-	}
-	return found;
-}
-
-bool template_next_callback(void *userp, tinytemplate_value_t *value)
-{
-	sqlite3_stmt *stmt = userp;
-	int res = sqlite3_step(stmt);
-	if (res != SQLITE_ROW) {
-		sqlite3_reset(stmt);
-		return false;
-	}
-
-	tinytemplate_set_dict(value, stmt, template_sqlstmt_param_callback);
-	return true;
-}
-
-bool template_param_callback(void *userp, const char *key, size_t len, tinytemplate_value_t *value)
-{
-	TemplateContext *c = userp;
-	string param = {.data=key, .size=len};
-
-	for (int i = 0; c->params[i].type != TPT_LAST; i++) {
-		if (streq(param, c->params[i].name)) {
-			switch (c->params[i].type) {
-				case TPT_INT   : tinytemplate_set_int   (value, c->params[i].i); break;
-				case TPT_FLOAT : tinytemplate_set_float (value, c->params[i].f); break;
-				case TPT_STRING: tinytemplate_set_string(value, c->params[i].s.data, c->params[i].s.size); break;
-				case TPT_QUERY : tinytemplate_set_array (value, c->params[i].q, template_next_callback); break;
-				case TPT_LAST  : assert(0); break;
-			}
-			return true;
-		}
-	}
-	return false;
-}
-
-bool append_template(ResponseBuilder *b, string file, TemplateParam *params)
-{
-	tinytemplate_status_t status;
-	tinytemplate_instr_t program[1<<9];
-	size_t num_instr;
-	char errmsg[1<<9];
-
-	string template_str;
-	if (!load_file_contents(file, &template_str))
-		return false;
-
-	status = tinytemplate_compile(template_str.data, template_str.size, program, COUNTOF(program), &num_instr, errmsg, sizeof(errmsg));
-	if (status != TINYTEMPLATE_STATUS_DONE) {
-		log_data(STR(errmsg));
-		myfree(template_str.data, template_str.size);
-		return false;
-	}
-
-	TemplateContext context;
-	context.b = b;
-	context.params = params;
-	status = tinytemplate_eval(template_str.data, program, &context, template_param_callback, template_output_callback, errmsg, sizeof(errmsg));
-	if (status != TINYTEMPLATE_STATUS_DONE)
-		log_data(STR(errmsg));
-	myfree(template_str.data, template_str.size);
-	return true;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// DATABASE                                                                                ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-int sqlite3_utils_fetch(sqlite3_stmt *stmt, char *types, ...)
-{
-	va_list args;
-	va_start(args, types);
-
-	int step = sqlite3_step(stmt);
-	if (step == SQLITE_DONE)
-		return 1; // No more rows
-	if (step != SQLITE_ROW)
-		return -1; // Error occurred
-	// Have a row
-	for (int i = 0; types[i]; i++) {
-		switch (types[i]) {
-
-			case 'x': 
-			*va_arg(args, const void**) = sqlite3_column_blob(stmt, i);
-			*va_arg(args, size_t*) = sqlite3_column_bytes(stmt, i);
-			break;
-
-			case 's':
-			{
-				string *dst = va_arg(args, string*);
-				dst->data = sqlite3_column_text(stmt, i);
-				dst->size = sqlite3_column_bytes(stmt, i);;
-			}
-			break;
-
-			case 'i': *va_arg(args, int*) = sqlite3_column_int(stmt, i); break;
-			default: va_end(args); return -1;
-		}
-	}
-	va_end(args);
-	return 0;
-}
-
-static sqlite3_stmt *vprep(sqlite3 *handle, const char *fmt, va_list args)
-{
-	char   buffer[1 << 10];
-	size_t copied = 0;
-
-	char params[8]; // The size of this buffer determines the maximum 
-					// number of parameters in a prepared query
-	int num_params = 0;
-
-	const char *stmt_str;
-	size_t      stmt_len;
-
-	size_t len = strlen(fmt);
-	size_t cur = 0;
-
-	while (cur < len && fmt[cur] != ':')
-		cur++;
-
-	if (cur == len) {
-		stmt_str = fmt;
-		stmt_len = len;
-	} else {
-
-		// The cursor refers to the first ':'
-
-		if (cur >= sizeof(buffer)) {
-			log_data(LIT("Statement text buffer is too small\n"));
-			return NULL;
-		}
-		
-		memcpy(buffer, fmt, cur);
-		copied = cur;
-
-		do {
-
-			assert(fmt[cur] == ':');
-			cur++;
-			if (cur == len) {
-				log_data(LIT("Missing type specifier after ':'\n"));
-				return NULL;
-			}
-			
-			char t = fmt[cur];
-			if (t != 'i' && t != 's' && t != 'x') {
-				log_format("Invalid type specifier '%c'\n", t);
-				return NULL;
-			}
-			cur++;
-
-			if (num_params == COUNTOF(params)) {
-				log_format("Parameter limit reached (%d)\n", COUNTOF(params));
-				return NULL;
-			}
-			params[num_params++] = t;
-
-			if (copied+1 >= sizeof(buffer)) {
-				log_data(LIT("Statement text buffer is too small\n"));
-				return NULL;
-			}
-			buffer[copied++] = '?';
-
-			size_t save = cur;
-
-			while (cur < len && fmt[cur] != ':')
-				cur++;
-
-			size_t copying = cur - save;
-			if (copied + copying >= sizeof(buffer)) {
-				log_data(LIT("Statement text buffer is too small\n"));
-				return NULL;
-			}
-			memcpy(buffer + copied, fmt + save, copying);
-			copied += copying;
-
-		} while (cur < len);
-
-		assert(copied < sizeof(buffer));
-		buffer[copied] = '\0';
-
-		stmt_str = buffer;
-		stmt_len = copied;
-	}
-
-	DEBUG("SQL: %.*s\n", (int) stmt_len, stmt_str);
-
-	sqlite3_stmt *stmt;
-	int code = sqlite3_prepare_v2(handle, stmt_str, stmt_len, &stmt, 0);
-	if (code != SQLITE_OK) {
-		log_format("Failed to prepare SQL statement (sqlite3: %s)\n", sqlite3_errmsg(handle));
-		return NULL;
-	}
-
-	for (int i = 0; i < num_params; i++) {
-		int code;
-		switch (params[i]) {
-			
-			case 'i': 
-			{
-				int v = va_arg(args, int);
-				DEBUG("binding param %d to int %d\n", i+1, v);
-				code = sqlite3_bind_int (stmt, i+1, v); 
-			}
-			break;
-
-			case 's': 
-			{
-				string str = va_arg(args, string);
-				DEBUG("binding param %d to str %.*s\n", i+1, (int) str.size, str.data);
-				code = sqlite3_bind_text(stmt, i+1, str.data, str.size, NULL); 
-			}
-			break;
-			
-			case 'x': 
-			{
-				void  *ptr = va_arg(args, void*);
-				size_t len = va_arg(args, size_t);
-				DEBUG("binding param %d to blob %p %d\n", i+1, ptr, (int) len);
-				code = sqlite3_bind_blob(stmt, i+1, ptr, len, NULL); 
-			}
-			break;
-		}
-		if (code != SQLITE_OK) {
-			log_format("Failed to bind parameter %d to SQL statement (sqlite3: %s)\n", i+1, sqlite3_errmsg(handle));
-			sqlite3_finalize(stmt);
-			return NULL;
-		}
-	}
-
-	return stmt;
-}
-
-sqlite3_stmt *sqlite3_utils_prepare(sqlite3 *handle, const char *fmt, ...)
-{
-	sqlite3_stmt *stmt;
-
-	va_list args;
-	va_start(args, fmt);
-	stmt = vprep(handle, fmt, args);
-	va_end(args);
-
-	return stmt;
-}
-
-bool sqlite3_utils_exec(sqlite3 *handle, const char *fmt, ...)
-{
-	sqlite3_stmt *stmt;
-
-	va_list args;
-	va_start(args, fmt);
-	stmt = vprep(handle, fmt, args);
-	va_end(args);
-
-	if (stmt == NULL)
-		return false;
-
-	if (sqlite3_step(stmt) != SQLITE_DONE) {
-		log_format("Failed to execute SQL statement (sqlite3: %s)\n", sqlite3_errmsg(handle));
-		sqlite3_finalize(stmt);
-		return false;
-	}
-
-	sqlite3_finalize(stmt);
-	return true;
-}
-
-int sqlite3_utils_rows_exist(sqlite3 *handle, const char *fmt, ...)
-{
-	sqlite3_stmt *stmt;
-
-	va_list args;
-	va_start(args, fmt);
-	stmt = vprep(handle, fmt, args);
-	va_end(args);
-
-	if (stmt == NULL)
-		return -1;
-
-	int step = sqlite3_step(stmt);
-	if (step == SQLITE_DONE) {
-		sqlite3_finalize(stmt);
-		return 1; // No rows exist
-	}
-
-	if (step == SQLITE_ROW) {
-		sqlite3_finalize(stmt);
-		return 0; // Rows exist
-	}
-
-	log_format("Failed to execute SQL statement (sqlite3: %s)\n", sqlite3_errmsg(handle));
-	sqlite3_finalize(stmt);
-	return -1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -5235,7 +3182,7 @@ BearSSLErrorInfo bearssl_error_table[] = {
 	{ BR_ERR_X509_NOT_TRUSTED,         LIT("BR_ERR_X509_NOT_TRUSTED"),         LIT("Chain could not be linked to a trust anchor.") },
 };
 
-BearSSLErrorInfo get_bearssl_error_info(int code)
+static BearSSLErrorInfo get_bearssl_error_info(int code)
 {
 	for (int i = 0; i < COUNTOF(bearssl_error_table); i++)
 		if (bearssl_error_table[i].code == code)
@@ -5262,7 +3209,7 @@ typedef struct {
 
 } PemDecodeContext;
 
-int is_ign(int c)
+static int is_ign(int c)
 {
 	if (c == 0) {
 		return 0;
@@ -5279,7 +3226,7 @@ int is_ign(int c)
 //    ASCII letters are converted to lowercase
 //    control characters, space, '-', '_', '.', '/', '+' and ':' are ignored
 // A terminating zero is returned as 0.
-char next_char(string *s)
+static char next_char(string *s)
 {
 	size_t i = 0;
 	while (i < s->size && is_ign(s->data[i]))
@@ -5298,7 +3245,7 @@ char next_char(string *s)
 	return to_lower(c);
 }
 
-bool eqstr__(string a, string b)
+static bool eqstr__(string a, string b)
 {
 	for (;;) {
 		char c1 = next_char(&a);
@@ -5308,7 +3255,7 @@ bool eqstr__(string a, string b)
 	}
 }
 
-void append_bytes(void *userptr, const void *str, size_t len)
+static void append_bytes(void *userptr, const void *str, size_t len)
 {
 	PemDecodeContext *context = userptr;
 
@@ -5342,7 +3289,7 @@ typedef struct {
 	int capacity;
 } PemArray;
 
-bool append_pem(PemArray *arr, PemObject obj)
+static bool append_pem(PemArray *arr, PemObject obj)
 {
 	if (arr->count == arr->capacity) {
 		int newcap = MAX(2 * arr->capacity, 4);
@@ -5360,7 +3307,7 @@ bool append_pem(PemArray *arr, PemObject obj)
 	return true;
 }
 
-void free_pem_array(PemArray *arr)
+static void free_pem_array(PemArray *arr)
 {
 	for (int i = 0; i < arr->count; i++) {
 
@@ -5374,7 +3321,7 @@ void free_pem_array(PemArray *arr)
 	myfree(arr->items, arr->capacity * sizeof(PemObject));
 }
 
-bool decode_pem(string src, PemArray *array)
+static bool decode_pem(string src, PemArray *array)
 {
 	br_pem_decoder_context context;
 	br_pem_decoder_init(&context);
@@ -5485,7 +3432,7 @@ bool decode_pem(string src, PemArray *array)
 	return true;
 }
 
-int looks_like_DER(string content)
+static int looks_like_DER(string content)
 {
 	int fb;
 	size_t dlen;
@@ -5519,7 +3466,7 @@ int looks_like_DER(string content)
 	}
 }
 
-bool decode_key(string src, PrivateKey *pkey)
+static bool decode_key(string src, PrivateKey *pkey)
 {
 	br_skey_decoder_context context;
 	br_skey_decoder_init(&context);
@@ -5590,7 +3537,7 @@ bool decode_key(string src, PrivateKey *pkey)
 	return true;
 }
 
-bool load_private_key_from_file(string file, PrivateKey *pkey)
+static bool load_private_key_from_file(string file, PrivateKey *pkey)
 {
 	string file_contents;
 	if (!load_file_contents(file, &file_contents))
@@ -5644,7 +3591,7 @@ bool load_private_key_from_file(string file, PrivateKey *pkey)
 	return ok;
 }
 
-void free_private_key(PrivateKey *pkey)
+static void free_private_key(PrivateKey *pkey)
 {
 	switch (pkey->type) {
 	
@@ -5658,7 +3605,7 @@ void free_private_key(PrivateKey *pkey)
 	}
 }
 
-bool append_cert(CertArray *arr, br_x509_certificate cert)
+static bool append_cert(CertArray *arr, br_x509_certificate cert)
 {
 	if (arr->count == arr->capacity) {
 		int newcap = MAX(2 * arr->capacity, 4);
@@ -5676,7 +3623,7 @@ bool append_cert(CertArray *arr, br_x509_certificate cert)
 	return true;
 }
 
-bool load_certs_from_file(string file, CertArray *array)
+static bool load_certs_from_file(string file, CertArray *array)
 {
 	string file_contents;
 	if (!load_file_contents(file, &file_contents))
@@ -5756,7 +3703,7 @@ bool load_certs_from_file(string file, CertArray *array)
 	return true;
 }
 
-void free_certs(CertArray *array)
+static void free_certs(CertArray *array)
 {
 	for (int i = 0; i < array->count; i++) {
 		br_x509_certificate item = array->items[i];

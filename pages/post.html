@@ -28,6 +28,20 @@
 			<article>
 				<h1>{{title}} (by {{author}})</h1>
 				<p>{{content}}</p>
+
+				<form action="/posts/{{id}}/comments" method="POST">
+					<textarea name="content" placeholder="comment"></textarea>
+					<input type="submit" value="comment" />
+				</form>
+
+				<table>
+				{% for comment in comments %}
+					<tr>
+						<td>{{comment.author}}:</td>
+						<td>{{comment.content}}</td>
+					</tr>
+				{% end %}
+				</table>
 			</article>
 		</main>
 	</body>

@@ -138,7 +138,6 @@ static sqlite3_stmt *vprep(sqlite3 *handle, const char *fmt, va_list args)
 			case 'i': 
 			{
 				int v = va_arg(args, int);
-				DEBUG("binding param %d to int %d\n", i+1, v);
 				code = sqlite3_bind_int (stmt, i+1, v); 
 			}
 			break;
@@ -146,7 +145,6 @@ static sqlite3_stmt *vprep(sqlite3 *handle, const char *fmt, va_list args)
 			case 's': 
 			{
 				string str = va_arg(args, string);
-				DEBUG("binding param %d to str %.*s\n", i+1, (int) str.size, str.data);
 				code = sqlite3_bind_text(stmt, i+1, str.data, str.size, NULL); 
 			}
 			break;
@@ -155,7 +153,6 @@ static sqlite3_stmt *vprep(sqlite3 *handle, const char *fmt, va_list args)
 			{
 				void  *ptr = va_arg(args, void*);
 				size_t len = va_arg(args, size_t);
-				DEBUG("binding param %d to blob %p %d\n", i+1, ptr, (int) len);
 				code = sqlite3_bind_blob(stmt, i+1, ptr, len, NULL); 
 			}
 			break;

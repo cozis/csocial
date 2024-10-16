@@ -3,7 +3,7 @@
 		<title>Log in</title>
 		<link rel="stylesheet" media="screen" href="/static/global.css" />
 	</head>
-	<body>
+	<body hx-boost="true">
 		<main>
 			<nav>
 				<table>
@@ -20,7 +20,9 @@
 				</table>
 			</nav>
 
-			<form method="POST" action="/action/login">
+			<script src="/static/htmx.js"></script>
+			<div id="login-error-message"></div>
+			<form hx-post="/action/login" hx-target="#login-error-message">
 				<input type="text"     name="name" placeholder="name" />
 				<input type="password" name="pass" placeholder="pass" />
 				<input type="submit"   value="login" />

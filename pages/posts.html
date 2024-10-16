@@ -3,7 +3,7 @@
 		<title>Posts</title>
 		<link rel="stylesheet" media="screen" href="/static/global.css" />
 	</head>
-	<body>
+	<body hx-boost="true">
 		<main>
 			<nav>
 				<table>
@@ -15,6 +15,7 @@
 				<table>
 					<tr>
 						{% if login %}
+						<td><a href="#" id="button-create-post">create post</a></td>
 						<td><a href="/users/{{login_username}}">{{login_username}}</a></td>
 						<td><a href="/action/logout">logout</a></td>
 						{% else %}
@@ -25,19 +26,53 @@
 				</table>
 			</nav>
 
-			{% if login %}
-			<form action="/action/post" method="POST">
-				<input type="text" name="title" placeholder="title" />
-				<textarea name="content" placeholder="content"></textarea>
-				<input type="submit" value="publish" />
-			</form>
-			{% end %}
-
 			{% for post in posts %}
 			<div class="post-preview">
-				<a href="/posts/{{post.id}}">{{post.title}}</a> by <a href="/users/{{post.author}}">{{post.author}}</a>
+				<div class="post-preview-title">
+					<a href="/posts/{{post.id}}">
+						{{post.title}}
+					</a>
+				</div>
+				<div class="post-preview-details">
+					<table>
+						<tr>
+							<td>
+								<a hx-post="/posts/{{post.id}}/upvotes" hx-target='.post-preview-details' hx-swap='outerHTML'>{{post.upvotes}}</a>
+							</td>
+							<td>
+								<a hx-post="/posts/{{post.id}}/downvotes" hx-target='.post-preview-details' hx-swap='outerHTML'>{{post.downvotes}}</a>
+							</td>
+							<td>
+								<span>by <a href="/users/{{post.author}}">{{post.author}}</a> at {{post.created_}}</span>
+							</td>
+							<td>
+								<span>{{post.num_comments}} comments</span>
+							</td>
+						</tr>
+					</table>
+				</div>
 			</div>
 			{% end %}
 		</main>
+
+		{% if login %}
+		<dialog id="modal-create-post">
+			<form method="dialog" id="modal-create-post-close-dialog-form"></form>
+			<form action="/action/post" method="POST" id="modal-create-post-publish-form">
+				<input type="text" name="title" placeholder="title" />
+				<textarea name="content" placeholder="content"></textarea>
+			</form>
+			<button form="modal-create-post-close-dialog-form">cancel</button>
+			<input type="submit" value="publish" form="modal-create-post-publish-form" />
+		</dialog>
+		{% end %}
+
+		<script src="/static/htmx.js"></script>
+		<script>
+			const modal_create_post = document.querySelector("#modal-create-post");
+			const button_create_post = document.querySelector("#button-create-post")
+
+			button_create_post.onclick = function (event) { modal_create_post.showModal(); } 
+		</script>
 	</body>
 </html>

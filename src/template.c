@@ -84,7 +84,7 @@ bool append_template(ResponseBuilder *b, string file, TemplateParam *params)
 
 	status = tinytemplate_compile(template_str.data, template_str.size, program, COUNTOF(program), &num_instr, errmsg, sizeof(errmsg));
 	if (status != TINYTEMPLATE_STATUS_DONE) {
-		log_data(STR(errmsg));
+		log_format("Template Compile Error: %s", errmsg);
 		myfree(template_str.data, template_str.size);
 		return false;
 	}
@@ -94,7 +94,7 @@ bool append_template(ResponseBuilder *b, string file, TemplateParam *params)
 	context.params = params;
 	status = tinytemplate_eval(template_str.data, program, &context, template_param_callback, template_output_callback, errmsg, sizeof(errmsg));
 	if (status != TINYTEMPLATE_STATUS_DONE)
-		log_data(STR(errmsg));
+		log_format("Template Runtime Error: %s", errmsg);
 	myfree(template_str.data, template_str.size);
 	return true;
 }

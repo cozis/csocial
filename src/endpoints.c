@@ -40,19 +40,37 @@ char schema[] =
 	"    bio  TEXT\n"
 	");\n"
 	"CREATE TABLE IF NOT EXISTS Posts(\n"
-	"    id      INTEGER PRIMARY KEY AUTOINCREMENT,\n"
-	"    title   TEXT NOT NULL,\n"
-	"    content TEXT NOT NULL,\n"
-	"    author  TEXT NOT NULL,\n"
+	"    id      INTEGER   PRIMARY KEY AUTOINCREMENT,\n"
+	"    title   TEXT      NOT NULL,\n"
+	"    content TEXT      NOT NULL,\n"
+	"    author  TEXT      NOT NULL,\n"
+	"    created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
 	"    FOREIGN KEY (author) REFERENCES Users(name)\n"
 	");\n"
 	"CREATE TABLE IF NOT EXISTS Comments(\n"
 	"    id      INTEGER PRIMARY KEY AUTOINCREMENT,\n"
-	"    content TEXT NOT NULL,\n"
-	"    author  TEXT NOT NULL,\n"
-	"    parent  INTEGER NOT NULL,\n"
+	"    content TEXT      NOT NULL,\n"
+	"    author  TEXT      NOT NULL,\n"
+	"    parent  INTEGER   NOT NULL,\n"
+	"    created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
 	"    FOREIGN KEY (author) REFERENCES Users(name),\n"
 	"    FOREIGN KEY (parent) REFERENCES Posts(id)\n"
+	");\n"
+	"CREATE TABLE IF NOT EXISTS PostVotes(\n"
+	"    user TEXT,\n"
+	"    post INTEGER,\n"
+	"    up   BOOLEAN NOT NULL,\n"
+	"    PRIMARY KEY (user, post),\n"
+	"    FOREIGN KEY (user) REFERENCES Users(name),\n"
+	"    FOREIGN KEY (post) REFERENCES Posts(id)\n"
+	");\n"
+	"CREATE TABLE IF NOT EXISTS CommentVotes(\n"
+	"    user    TEXT,\n"
+	"    comment INTEGER,\n"
+	"    up      BOOLEAN NOT NULL,\n"
+	"    PRIMARY KEY (user, comment),\n"
+	"    FOREIGN KEY (user)    REFERENCES Users(name),\n"
+	"    FOREIGN KEY (comment) REFERENCES Comments(id)\n"
 	");\n"
 	"PRAGMA foreign_keys = ON;\n";
 
@@ -89,6 +107,128 @@ void free_endpoints(void)
 	sqlite3_close(db);
 }
 
+void respond_with_post_details_html(ResponseBuilder *b, int details_post_id)
+{
+	sqlite3_stmt *stmt = sqlite3_utils_prepare(db,
+		"SELECT P.author, "
+		"    STRFTIME('%d/%m/%Y, %H.%M', P.created) AS created_, "
+		"    (SELECT COUNT(*) FROM Comments AS C WHERE C.parent = P.id) AS num_comments, "
+		"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=1) AS upvotes, "
+		"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0) AS downvotes "
+		"FROM Posts AS P");
+	if (stmt == NULL) {
+		status_line(b, 500);
+		return;
+	}
+	string author;
+	string created;
+	int num_comments;
+	int upvotes;
+	int downvotes;
+	if (sqlite3_utils_fetch(stmt, "ssiii", &author, &created, &num_comments, &upvotes, &downvotes)) {
+		sqlite3_finalize(stmt);
+		status_line(b, 500);
+		return;
+	}
+	status_line(b, 200);
+	append_content_f(b, 
+	"<div class='post-preview-details'> \
+		<table>                         \
+			<tr>                        \
+				<td>                    \
+					<a hx-post='/posts/%d/upvotes' hx-target='.post-preview-details' hx-swap='outerHTML'>%d</a> \
+				</td>                   \
+				<td>                    \
+					<a hx-post='/posts/%d/downvotes' hx-target='.post-preview-details' hx-swap='outerHTML'>%d</a> \
+				</td>                   \
+				<td>                    \
+					<span>by <a href='/users/%.*s'>%.*s</a> at %.*s</span> \
+				</td>                   \
+				<td>                    \
+					<span>%d comments</span> \
+				</td>                   \
+			</tr>                       \
+		</table>                        \
+	</div>",
+	details_post_id, upvotes, details_post_id, downvotes,
+	(int) author.size, author.data,
+	(int) author.size, author.data,
+	(int) created.size, created.data,
+	num_comments);
+
+	sqlite3_finalize(stmt);
+}
+
+// Returns true iff the request was handled
+static bool voting_endpoints(Request request, ResponseBuilder *b, string login_username)
+{
+	int vote_post_id;
+
+	if (!match_path_format(request.url.path, "/posts/:n/upvotes", &vote_post_id)) {
+
+		if (login_username.size == 0) {
+			status_line(b, 400);
+			return true;
+		}
+
+		int up = 1;
+
+		// Create the UP row
+		if (sqlite3_utils_exec(db, "INSERT INTO PostVotes(user, post, up) VALUES (:s, :i, :i)", login_username, vote_post_id, up)) {
+			respond_with_post_details_html(b, vote_post_id);
+			return true;
+		}
+
+		// If we failed, maybe we need to delete the current UP row
+		if (sqlite3_utils_exec(db, "DELETE FROM PostVotes WHERE up=:i AND user=:s AND post=:i", up, login_username, vote_post_id) && sqlite3_changes(db) > 0) {
+			respond_with_post_details_html(b, vote_post_id);
+			return true;
+		}
+
+		// If we failed, maybe we need to invert the UP row
+		if (sqlite3_utils_exec(db, "UPDATE PostVotes SET up=:i WHERE user=:s AND post=:i", up, login_username, vote_post_id)) {
+			respond_with_post_details_html(b, vote_post_id);
+			return true;
+		}
+
+		respond_with_post_details_html(b, vote_post_id);
+		return true;
+	}
+
+	if (!match_path_format(request.url.path, "/posts/:n/downvotes", &vote_post_id)) {
+
+		if (login_username.size == 0) {
+			status_line(b, 400);
+			return true;
+		}
+
+		int up = 0;
+
+		// Create the UP row
+		if (sqlite3_utils_exec(db, "INSERT INTO PostVotes(user, post, up) VALUES (:s, :i, :i)", login_username, vote_post_id, up)) {
+			respond_with_post_details_html(b, vote_post_id);
+			return true;
+		}
+
+		// If we failed, maybe we need to delete the current UP row
+		if (sqlite3_utils_exec(db, "DELETE FROM PostVotes WHERE up=:i AND user=:s AND post=:i", up, login_username, vote_post_id) && sqlite3_changes(db) > 0) {
+			respond_with_post_details_html(b, vote_post_id);
+			return true;
+		}
+
+		// If we failed, maybe we need to invert the UP row
+		if (sqlite3_utils_exec(db, "UPDATE PostVotes SET up=:i WHERE user=:s AND post=:i", up, login_username, vote_post_id)) {
+			respond_with_post_details_html(b, vote_post_id);
+			return true;
+		}
+
+		respond_with_post_details_html(b, vote_post_id);
+		return true;
+	}
+
+	return false;
+}
+
 void respond(Request request, ResponseBuilder *b)
 {
 	if (request.major != 1 || request.minor > 1) {
@@ -108,43 +248,47 @@ void respond(Request request, ResponseBuilder *b)
 			add_header(b, LIT("Location: /"));
 			return;
 		}
+
 		char namebuf[MAX_USER_NAME];
 		char passbuf[MAX_USER_PASS];
 		string name;		string pass;
 		if (!get_query_string_param(request.content, LIT("name"), LIT(namebuf), &name)) {
-			status_line(b, 500);
+			status_line(b, 200);
 			append_content_s(b, LIT("Invalid name"));
 			return;
 		}
 		if (!get_query_string_param(request.content, LIT("pass"), LIT(passbuf), &pass)) {
-			status_line(b, 500);
+			status_line(b, 200);
 			append_content_s(b, LIT("Invalid pass"));
 			return;
 		}
 		int res = sqlite3_utils_rows_exist(db, "SELECT name FROM Users WHERE name=:s AND pass=:s", name, pass);
 		if (res == -1) {
-			status_line(b, 500);
+			status_line(b, 200);
 			append_content_s(b, LIT("Internal error"));
 			return;
 		}
 		if (res == 1) {
 			// No such user
-			status_line(b, 400);
+			status_line(b, 200);
 			append_content_s(b, LIT("Invalid credentials"));
 			return;
 		}
 		SessionID sessid = create_session(name);
 		if (sessid == NO_SESSION) {
-			status_line(b, 500);
+			status_line(b, 200);
 			append_content_s(b, LIT("Internal error"));
 			return;
 		}
 		// User exist
 		status_line(b, 303);
 		add_header_f(b, "Set-Cookie: sessid=%d; Path=/", sessid);
-		add_header(b, LIT("Location: /"));
+		add_header(b, LIT("HX-Redirect: /"));
 		return;
 	}
+
+	if (voting_endpoints(request, b, login_username))
+		return;
 
 	if (streq(request.url.path, LIT("/action/signup"))) {
 		if (login_username.size > 0) {
@@ -245,7 +389,13 @@ void respond(Request request, ResponseBuilder *b)
 	}
 
 	if (!match_path_format(request.url.path, "/posts")) {
-		sqlite3_stmt *stmt = sqlite3_utils_prepare(db, "SELECT id, title, author FROM Posts");
+		sqlite3_stmt *stmt = sqlite3_utils_prepare(db,
+			"SELECT P.id, P.title, P.author, "
+			"    STRFTIME('%d/%m/%Y, %H.%M', P.created) AS created_, "
+			"    (SELECT COUNT(*) FROM Comments AS C WHERE C.parent = P.id) AS num_comments, "
+			"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=1) AS upvotes, "
+			"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0) AS downvotes "
+			"FROM Posts AS P");
 		if (stmt == NULL) {
 			status_line(b, 500);
 			return;

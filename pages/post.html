@@ -3,7 +3,7 @@
 		<title>{{title}}</title>
 		<link rel="stylesheet" media="screen" href="/static/global.css" />
 	</head>
-	<body>
+	<body hx-boost="true">
 		<main>
 			<nav>
 				<table>
@@ -26,8 +26,11 @@
 			</nav>
 
 			<article>
-				<h1>{{title}} (by {{author}})</h1>
-				<p>{{content}}</p>
+
+				<div class="post">
+					<h1>{{title}} (by {{author}})</h1>
+					<p>{{content}}</p>
+				</div>
 
 				{% if login %}
 				<form action="/posts/{{id}}/comments" method="POST">
@@ -36,14 +39,12 @@
 				</form>
 				{% end %}
 
-				<table>
 				{% for comment in comments %}
-					<tr>
-						<td>{{comment.author}}:</td>
-						<td>{{comment.content}}</td>
-					</tr>
+				<div class="comment">
+					<a href="/users/{{comment.author}}">{{comment.author}}</a>:
+					{{comment.content}}
+				</div>
 				{% end %}
-				</table>
 			</article>
 		</main>
 	</body>

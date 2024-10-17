@@ -37,10 +37,24 @@
 					<table>
 						<tr>
 							<td>
-								<a hx-post="/posts/{{post.id}}/upvotes" hx-target='.post-preview-details' hx-swap='outerHTML'>{{post.upvotes}}</a>
+								<a hx-post="/posts/{{post.id}}/upvotes" hx-target='.post-preview-details' hx-swap='outerHTML'>
+									{{post.upvotes}}
+									{% if post.upvoted %}
+									<img src="/static/upvote_full.svg" />
+									{% else %}
+									<img src="/static/upvote_empty.svg" />
+									{% end %}
+								</a>
 							</td>
 							<td>
-								<a hx-post="/posts/{{post.id}}/downvotes" hx-target='.post-preview-details' hx-swap='outerHTML'>{{post.downvotes}}</a>
+								<a hx-post="/posts/{{post.id}}/downvotes" hx-target='.post-preview-details' hx-swap='outerHTML'>
+									{{post.downvotes}}
+									{% if post.downvoted %}
+									<img src="/static/upvote_full.svg" class="rotate180" />
+									{% else %}
+									<img src="/static/upvote_empty.svg" class="rotate180" />
+									{% end %}
+								</a>
 							</td>
 							<td>
 								<span>by <a href="/users/{{post.author}}">{{post.author}}</a> at {{post.created_}}</span>

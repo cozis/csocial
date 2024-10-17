@@ -107,15 +107,19 @@ void free_endpoints(void)
 	sqlite3_close(db);
 }
 
-void respond_with_post_details_html(ResponseBuilder *b, int details_post_id)
+void respond_with_post_details_html(ResponseBuilder *b, int details_post_id, string login_username)
 {
 	sqlite3_stmt *stmt = sqlite3_utils_prepare(db,
 		"SELECT P.author, "
 		"    STRFTIME('%d/%m/%Y, %H.%M', P.created) AS created_, "
 		"    (SELECT COUNT(*) FROM Comments AS C WHERE C.parent = P.id) AS num_comments, "
 		"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=1) AS upvotes, "
-		"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0) AS downvotes "
-		"FROM Posts AS P");
+		"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0) AS downvotes, "
+		"    EXISTS(SELECT * FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=1 AND PV.user=:s) AS upvoted, "
+		"    EXISTS(SELECT * FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0 AND PV.user=:s) AS downvoted "
+		"FROM Posts AS P",
+		login_username,
+		login_username);
 	if (stmt == NULL) {
 		status_line(b, 500);
 		return;
@@ -125,36 +129,46 @@ void respond_with_post_details_html(ResponseBuilder *b, int details_post_id)
 	int num_comments;
 	int upvotes;
 	int downvotes;
-	if (sqlite3_utils_fetch(stmt, "ssiii", &author, &created, &num_comments, &upvotes, &downvotes)) {
+	int upvoted;
+	int downvoted;
+	if (sqlite3_utils_fetch(stmt, "ssiiiii", &author, &created, &num_comments, &upvotes, &downvotes, &upvoted, &downvoted)) {
 		sqlite3_finalize(stmt);
 		status_line(b, 500);
 		return;
 	}
 	status_line(b, 200);
 	append_content_f(b, 
-	"<div class='post-preview-details'> \
-		<table>                         \
-			<tr>                        \
-				<td>                    \
-					<a hx-post='/posts/%d/upvotes' hx-target='.post-preview-details' hx-swap='outerHTML'>%d</a> \
-				</td>                   \
-				<td>                    \
-					<a hx-post='/posts/%d/downvotes' hx-target='.post-preview-details' hx-swap='outerHTML'>%d</a> \
-				</td>                   \
-				<td>                    \
-					<span>by <a href='/users/%.*s'>%.*s</a> at %.*s</span> \
-				</td>                   \
-				<td>                    \
-					<span>%d comments</span> \
-				</td>                   \
-			</tr>                       \
-		</table>                        \
-	</div>",
-	details_post_id, upvotes, details_post_id, downvotes,
-	(int) author.size, author.data,
-	(int) author.size, author.data,
-	(int) created.size, created.data,
-	num_comments);
+		"<div class='post-preview-details'>\
+			<table>\
+				<tr>\
+					<td>\
+						<a hx-post='/posts/%d/upvotes' hx-target='.post-preview-details' hx-swap='outerHTML'>\
+							%d\
+							<img src='%s' />\
+						</a>\
+					</td>\
+					<td>\
+						<a hx-post='/posts/%d/downvotes' hx-target='.post-preview-details' hx-swap='outerHTML'>\
+							%d\
+							<img src='%s' class='rotate180' />\
+						</a>\
+					</td>\
+					<td>\
+						<span>by <a href='/users/%.*s'>%.*s</a> at %.*s</span>\
+					</td>\
+					<td>\
+						<span>%d comments</span>\
+					</td>\
+				</tr>\
+			</table>\
+		</div>",
+		details_post_id, upvotes,   upvoted ? "/static/upvote_full.svg" : "/static/upvote_empty.svg",
+		details_post_id, downvotes, downvoted ? "/static/upvote_full.svg" : "/static/upvote_empty.svg",
+		(int) author.size, author.data,
+		(int) author.size, author.data,
+		(int) created.size, created.data,
+		num_comments
+	);
 
 	sqlite3_finalize(stmt);
 }
@@ -175,23 +189,23 @@ static bool voting_endpoints(Request request, ResponseBuilder *b, string login_u
 
 		// Create the UP row
 		if (sqlite3_utils_exec(db, "INSERT INTO PostVotes(user, post, up) VALUES (:s, :i, :i)", login_username, vote_post_id, up)) {
-			respond_with_post_details_html(b, vote_post_id);
+			respond_with_post_details_html(b, vote_post_id, login_username);
 			return true;
 		}
 
 		// If we failed, maybe we need to delete the current UP row
 		if (sqlite3_utils_exec(db, "DELETE FROM PostVotes WHERE up=:i AND user=:s AND post=:i", up, login_username, vote_post_id) && sqlite3_changes(db) > 0) {
-			respond_with_post_details_html(b, vote_post_id);
+			respond_with_post_details_html(b, vote_post_id, login_username);
 			return true;
 		}
 
 		// If we failed, maybe we need to invert the UP row
 		if (sqlite3_utils_exec(db, "UPDATE PostVotes SET up=:i WHERE user=:s AND post=:i", up, login_username, vote_post_id)) {
-			respond_with_post_details_html(b, vote_post_id);
+			respond_with_post_details_html(b, vote_post_id, login_username);
 			return true;
 		}
 
-		respond_with_post_details_html(b, vote_post_id);
+		respond_with_post_details_html(b, vote_post_id, login_username);
 		return true;
 	}
 
@@ -206,23 +220,23 @@ static bool voting_endpoints(Request request, ResponseBuilder *b, string login_u
 
 		// Create the UP row
 		if (sqlite3_utils_exec(db, "INSERT INTO PostVotes(user, post, up) VALUES (:s, :i, :i)", login_username, vote_post_id, up)) {
-			respond_with_post_details_html(b, vote_post_id);
+			respond_with_post_details_html(b, vote_post_id, login_username);
 			return true;
 		}
 
 		// If we failed, maybe we need to delete the current UP row
 		if (sqlite3_utils_exec(db, "DELETE FROM PostVotes WHERE up=:i AND user=:s AND post=:i", up, login_username, vote_post_id) && sqlite3_changes(db) > 0) {
-			respond_with_post_details_html(b, vote_post_id);
+			respond_with_post_details_html(b, vote_post_id, login_username);
 			return true;
 		}
 
 		// If we failed, maybe we need to invert the UP row
 		if (sqlite3_utils_exec(db, "UPDATE PostVotes SET up=:i WHERE user=:s AND post=:i", up, login_username, vote_post_id)) {
-			respond_with_post_details_html(b, vote_post_id);
+			respond_with_post_details_html(b, vote_post_id, login_username);
 			return true;
 		}
 
-		respond_with_post_details_html(b, vote_post_id);
+		respond_with_post_details_html(b, vote_post_id, login_username);
 		return true;
 	}
 
@@ -394,8 +408,12 @@ void respond(Request request, ResponseBuilder *b)
 			"    STRFTIME('%d/%m/%Y, %H.%M', P.created) AS created_, "
 			"    (SELECT COUNT(*) FROM Comments AS C WHERE C.parent = P.id) AS num_comments, "
 			"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=1) AS upvotes, "
-			"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0) AS downvotes "
-			"FROM Posts AS P");
+			"    (SELECT COUNT(*) FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0) AS downvotes, "
+			"    EXISTS(SELECT * FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=1 AND PV.user = :s) AS upvoted, "
+			"    EXISTS(SELECT * FROM PostVotes AS PV WHERE PV.post = P.id AND PV.up=0 AND PV.user = :s) AS downvoted "
+			"FROM Posts AS P",
+			login_username,
+			login_username);
 		if (stmt == NULL) {
 			status_line(b, 500);
 			return;
